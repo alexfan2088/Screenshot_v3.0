@@ -197,6 +197,8 @@ namespace Screenshot_v3_0
             {
                 WriteError($"设置音频比特率失败", ex);
             }
+
+
         }
 
         private void SliderResolution_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -310,6 +312,8 @@ namespace Screenshot_v3_0
                 WriteError($"ComboAudioBitrate_SelectionChanged 失败", ex);
             }
         }
+
+
 
         private void UpdateEstimatedSize()
         {

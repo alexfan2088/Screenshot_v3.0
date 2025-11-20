@@ -52,7 +52,7 @@ namespace Screenshot_v3_0
 
                 // 生成临时 WAV 路径
                 var tempDir = Path.GetDirectoryName(outAacPath);
-                var tempFileName = $"temp_{Path.GetFileNameWithoutExtension(outAacPath)}.wav";
+                var tempFileName = $"{Path.GetFileNameWithoutExtension(outAacPath)}.wav";
                 _tempWavPath = Path.Combine(tempDir!, tempFileName);
 
                 // 创建 WASAPI Loopback 捕获（系统播放输出）

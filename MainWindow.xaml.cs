@@ -5,6 +5,8 @@ using System.Threading;
 using System.Windows;
 using System.Runtime.InteropServices;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.Windows.Threading;
 using static Screenshot_v3_0.Logger;
 
 namespace Screenshot_v3_0
@@ -18,10 +20,42 @@ namespace Screenshot_v3_0
         private readonly string _configPath;
         private bool _isVideoRecording;
         private RegionHighlightWindow? _regionHighlightWindow;
+        
+        // 截图相关
+        private DispatcherTimer? _screenshotTimer;
+        private Bitmap? _lastScreenshot;
+        private DateTime _lastScreenshotTime;
+        private bool _isScreenshotEnabled;
+        private readonly string _screenshotDir;
+        
+        // PPT和PDF生成器
+        private PPTGenerator? _pptGenerator;
+        private PDFGenerator? _pdfGenerator;
+        private string? _pptFilePath;
+        private string? _pdfFilePath;
+        private bool _pptPdfInitialized = false;
+        
+        // 录制状态信息
+        private DateTime _recordingStartTime;
+        private int _screenshotCount = 0;
+        private DispatcherTimer? _statusUpdateTimer;
+        private string _currentOperation = "";
+        private double _currentScreenChangeRate = 0.0; // 实时检测到的屏幕变化率
 
         public MainWindow()
         {
             InitializeComponent();
+            
+            // 设置窗口始终置顶
+            this.Topmost = true;
+            
+            // 设置窗口初始位置在屏幕顶部居中
+            this.WindowStartupLocation = WindowStartupLocation.Manual;
+            this.Left = (SystemParameters.PrimaryScreenWidth - this.Width) / 2;
+            this.Top = 10; // 距离顶部10像素
+            
+            // 添加窗口拖拽功能（无边框窗口需要手动实现）
+            this.MouseDown += MainWindow_MouseDown;
             
             // 设置窗口关闭事件
             this.Closing += MainWindow_Closing;
@@ -36,6 +70,10 @@ namespace Screenshot_v3_0
             string driveLetter = Directory.Exists("D:\\") ? "D:" : "C:";
             _workDir = Path.Combine(driveLetter, "ScreenshotV3.0");
             Directory.CreateDirectory(_workDir);
+            
+            // 设置截图目录：优先使用D盘，如果D盘不存在则使用C盘
+            _screenshotDir = Path.Combine(driveLetter, "ScreenshotV3.0");
+            Directory.CreateDirectory(_screenshotDir);
 
             // 加载配置
             _config = RecordingConfig.Load(_configPath);
@@ -47,8 +85,38 @@ namespace Screenshot_v3_0
             // SetLogDirectory 会根据模式决定是否清空日志文件
             Logger.SetLogDirectory(_workDir);
             
+            // 初始化截图定时器
+            _screenshotTimer = new DispatcherTimer();
+            _screenshotTimer.Tick += ScreenshotTimer_Tick;
+            _lastScreenshotTime = DateTime.Now;
+            
+            // 初始化截图功能（默认开启）
+            _isScreenshotEnabled = true;
+            if (MenuScreenshot != null)
+            {
+                MenuScreenshot.IsChecked = true;
+            }
+            
+            // 启动截图定时器（默认开启）
+            if (_screenshotTimer != null)
+            {
+                _screenshotTimer.Interval = TimeSpan.FromSeconds(1);
+                _screenshotTimer.Start();
+                _lastScreenshotTime = DateTime.Now;
+            }
+            
             // 初始化菜单项状态
             UpdateLogMenuItems();
+            UpdatePPTAndPDFMenuItems();
+            
+            // 初始化区域显示菜单项
+            if (MenuShowRegionOverlay != null)
+            {
+                MenuShowRegionOverlay.IsChecked = _config.ShowRegionOverlay;
+            }
+            
+            // 初始化界面上的设置输入框
+            InitializeSettingsControls();
             
             Logger.WriteLine("程序启动");
             Logger.WriteLine($"日志状态: {(Logger.Enabled ? "启用" : "禁用")}");
@@ -56,11 +124,40 @@ namespace Screenshot_v3_0
             
             UpdateConfigDisplay();
             
-            // 延迟初始化区域高亮，直到窗口加载完成
+            // 延迟初始化区域高亮和截图基准画面，直到窗口加载完成
             this.Loaded += (s, e) =>
             {
-                UpdateRegionOverlay();
+                // 启动时，根据配置决定是否显示上次保存的区域
+                if (_config.ShowRegionOverlay && HasValidCustomRegion())
+                {
+                    UpdateRegionOverlay();
+                }
+                // 窗口加载完成后，初始化 _lastScreenshot 作为第一次检查的基准画面
+                if (_isScreenshotEnabled)
+                {
+                    UpdateLastScreenshot();
+                }
             };
+        }
+
+        private void MainWindow_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            // 实现无边框窗口拖拽功能（只在非按钮区域才能拖拽）
+            if (e.ChangedButton == System.Windows.Input.MouseButton.Left && 
+                e.Source is not System.Windows.Controls.Button)
+            {
+                this.DragMove();
+            }
+        }
+
+        private void BtnMinimize_Click(object sender, RoutedEventArgs e)
+        {
+            this.WindowState = WindowState.Minimized;
+        }
+
+        private void BtnClose_Click(object sender, RoutedEventArgs e)
+        {
+            this.Close();
         }
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -129,6 +226,19 @@ namespace Screenshot_v3_0
                     {
                         WriteError($"释放资源时出错", ex);
                     }
+                    
+                    // 停止截图定时器
+                    try
+                    {
+                        if (_screenshotTimer != null && _screenshotTimer.IsEnabled)
+                        {
+                            _screenshotTimer.Stop();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteError($"停止截图定时器时出错", ex);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -147,10 +257,9 @@ namespace Screenshot_v3_0
                     _config = settingsWindow.Config;
                     _config.Save(_configPath);
                     UpdateConfigDisplay();
-                    if (StatusBarInfo != null)
-                    {
-                        StatusBarInfo.Text = "设置已保存";
-                    }
+                    UpdateLogMenuItems();
+                    UpdatePPTAndPDFMenuItems();
+                    UpdateStatusDisplay("设置已保存");
                 }
             }
             catch (Exception ex)
@@ -160,10 +269,7 @@ namespace Screenshot_v3_0
                 {
                     errorMsg += $"\n详细：{ex.InnerException.Message}";
                 }
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = errorMsg;
-                }
+                UpdateStatusDisplay(errorMsg);
                 WriteError($"打开设置窗口异常", ex);
             }
         }
@@ -197,10 +303,7 @@ namespace Screenshot_v3_0
                                          $"请重新选择区域或清除区域设置使用全屏录制。";
                         
                         WriteError(errorMsg);
-                        if (StatusBarInfo != null)
-                        {
-                            StatusBarInfo.Text = "录制区域超出屏幕范围，请重新选择";
-                        }
+                        UpdateStatusDisplay("录制区域超出屏幕范围，请重新选择");
                         
                         MessageBox.Show(errorMsg, "区域超出范围", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return;
@@ -228,10 +331,10 @@ namespace Screenshot_v3_0
 
                 // 开始音频录制（使用 NAudio WasapiLoopbackCapture，无需虚拟声卡）
                 // 注意：无论是否有声音输出，都要录制音频（包括静音）
-                // AudioRecorder.Start() 会创建 temp_{filename}.wav 文件
+                // AudioRecorder.Start() 会创建与目标同名的临时 wav 文件
                 var timestamp = DateTime.Now.ToString("yyMMddHHmmss");
                 var audioOutputPath = Path.Combine(_workDir, $"audio_{timestamp}.m4a"); // 最终输出路径（不会被使用）
-                var expectedAudioPath = Path.Combine(_workDir, $"temp_audio_{timestamp}.wav"); // AudioRecorder 实际创建的文件
+                var expectedAudioPath = Path.Combine(_workDir, $"audio_{timestamp}.wav"); // AudioRecorder 实际创建的文件
                 WriteLine($"========== 开始录制 ==========");
                 WriteLine($"视频文件: {videoPath}");
                 WriteLine($"开始音频录制（NAudio WasapiLoopbackCapture，即使静音也会录制），输出路径: {audioOutputPath}");
@@ -253,25 +356,39 @@ namespace Screenshot_v3_0
                 _isVideoRecording = true;
                 BtnStartVideo.IsEnabled = false;
                 BtnStopVideo.IsEnabled = true;
+                BtnSelectRegion.IsEnabled = false;
+                
+                // 初始化录制状态信息
+                _recordingStartTime = DateTime.Now;
+                _screenshotCount = 0;
+                
+                // 启动状态更新定时器
+                _statusUpdateTimer = new DispatcherTimer();
+                _statusUpdateTimer.Interval = TimeSpan.FromMilliseconds(500); // 每500ms更新一次
+                _statusUpdateTimer.Tick += StatusUpdateTimer_Tick;
+                _statusUpdateTimer.Start();
 
-                if (StatusBarInfo != null)
+                // 状态显示会在定时器中更新，显示：屏幕变化率、录制间隔、截图数量
+                // 立即更新一次状态
+                UpdateRecordingStatus();
+                
+                // 如果截图功能开启，立即截图一张
+                if (_isScreenshotEnabled)
                 {
-                    if (HasValidCustomRegion())
+                    try
                     {
-                        StatusBarInfo.Text = $"开始录制自定义区域：{videoWidth}x{videoHeight} @ ({offsetX},{offsetY})";
+                        CaptureScreenshot();
+                        WriteLine("开始录制时立即截图一张");
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        StatusBarInfo.Text = $"开始录制视频 → {videoPath} | 分辨率: {videoWidth}x{videoHeight} @ {_config.VideoFrameRate}fps";
+                        WriteError($"开始录制时截图失败", ex);
                     }
                 }
             }
             catch (Exception ex)
             {
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = $"开始录制视频失败：{ex.Message}";
-                }
+                UpdateStatusDisplay($"开始录制视频失败：{ex.Message}");
             }
         }
 
@@ -283,10 +400,10 @@ namespace Screenshot_v3_0
 
                 // 先禁用按钮，防止重复点击
                 BtnStopVideo.IsEnabled = false;
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = "正在停止录制...";
-                }
+                
+                // 立即更新状态显示
+                _currentOperation = "正在停止录制...";
+                UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
 
                 // 在后台线程执行停止操作，避免阻塞 UI
                 ThreadPool.QueueUserWorkItem(_ =>
@@ -307,6 +424,13 @@ namespace Screenshot_v3_0
                         WriteLine($"停止音频录制");
                         _audioRecorder.Stop();
                         
+                        // 更新状态：正在生成MP4文件
+                        Dispatcher.Invoke(() =>
+                        {
+                            _currentOperation = "正在生成MP4文件...";
+                            UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                        });
+                        
                         // 等待音频管道数据刷新（实时合成模式）或音频文件写入完成（文件合并模式）
                         System.Threading.Thread.Sleep(1000);
                         
@@ -322,7 +446,7 @@ namespace Screenshot_v3_0
                         // 实时合成模式下，音频已经通过管道写入 FFmpeg，无需合并
                         
                         // 尝试查找临时音频文件（仅在文件合并模式下需要）
-                        var tempAudioFiles = Directory.GetFiles(_workDir, "temp_*.wav");
+                        var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
                         if (tempAudioFiles.Length == 0)
                         {
                             tempAudioFiles = Directory.GetFiles(_workDir, "temp_audio_*.wav");
@@ -351,8 +475,34 @@ namespace Screenshot_v3_0
                         _videoEncoder?.Finish(); // 这会发送 'q' 给 FFmpeg，等待退出，然后根据模式决定是否合并音频
                         WriteLine($"视频编码完成");
 
-                // 释放资源
-                _videoEncoder?.Dispose();
+                        // 释放资源
+                        _videoEncoder?.Dispose();
+
+                        // 完成PPT和PDF生成（在MP4生成完成后立即执行）
+                        if (_config.GeneratePPT || _config.GeneratePDF)
+                        {
+                            if (_config.GeneratePPT)
+                            {
+                                Dispatcher.Invoke(() =>
+                                {
+                                    _currentOperation = "正在生成PPT文件...";
+                                    UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                                });
+                            }
+                            
+                            if (_config.GeneratePDF)
+                            {
+                                Dispatcher.Invoke(() =>
+                                {
+                                    _currentOperation = "正在生成PDF文件...";
+                                    UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                                });
+                            }
+                        }
+                        
+                        WriteLine($"准备完成PPT和PDF生成");
+                        FinalizePPTAndPDF();
+                        WriteLine($"PPT和PDF生成完成");
 
                         // 在 UI 线程更新界面
                         Dispatcher.Invoke(() =>
@@ -360,11 +510,11 @@ namespace Screenshot_v3_0
                             _videoEncoder = null;
                             _isVideoRecording = false;
                             BtnStartVideo.IsEnabled = true;
+                            BtnSelectRegion.IsEnabled = true;
                             
-                            if (StatusBarInfo != null)
-                            {
-                                StatusBarInfo.Text = "视频录制已停止（编码完成需几秒）";
-                            }
+                            // 清除当前操作，恢复正常状态显示
+                            _currentOperation = "";
+                            UpdateStatusDisplay("视频录制已停止");
                         });
                     }
                     catch (Exception ex)
@@ -372,24 +522,30 @@ namespace Screenshot_v3_0
                         WriteError($"停止录制失败", ex);
                         Dispatcher.Invoke(() =>
                         {
-                            if (StatusBarInfo != null)
-                            {
-                                StatusBarInfo.Text = $"停止录制失败：{ex.Message}";
-                            }
+                            // 停止状态更新定时器
+                            _statusUpdateTimer?.Stop();
+                            _statusUpdateTimer = null;
+                            _currentOperation = "";
+                            
+                            UpdateStatusDisplay($"停止录制失败：{ex.Message}");
                             BtnStartVideo.IsEnabled = true;
                             BtnStopVideo.IsEnabled = true;
+                            BtnSelectRegion.IsEnabled = true;
                         });
                     }
                 });
             }
             catch (Exception ex)
             {
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = $"停止录制视频失败：{ex.Message}";
-                }
+                // 停止状态更新定时器
+                _statusUpdateTimer?.Stop();
+                _statusUpdateTimer = null;
+                _currentOperation = "";
+                
+                UpdateStatusDisplay($"停止录制视频失败：{ex.Message}");
                 BtnStartVideo.IsEnabled = true;
                 BtnStopVideo.IsEnabled = true;
+                BtnSelectRegion.IsEnabled = true;
             }
         }
 
@@ -405,21 +561,284 @@ namespace Screenshot_v3_0
 
         private void UpdateConfigDisplay()
         {
+            UpdateStatusDisplay(null);
+        }
+
+        /// <summary>
+        /// 状态更新定时器事件
+        /// </summary>
+        private void StatusUpdateTimer_Tick(object? sender, EventArgs e)
+        {
+            if (_isVideoRecording)
+            {
+                // 录制中：显示屏幕变化率、录制间隔、截图数量
+                UpdateRecordingStatus();
+            }
+        }
+
+        /// <summary>
+        /// 更新录制状态显示
+        /// </summary>
+        private void UpdateRecordingStatus()
+        {
             try
             {
-                if (StatusBarConfig != null)
+                // 如果截图功能未启用，显示提示信息
+                if (!_isScreenshotEnabled)
                 {
-                    string regionInfo = HasValidCustomRegion()
-                        ? $"区域：{_config.RegionWidth}x{_config.RegionHeight} @ ({_config.RegionLeft},{_config.RegionTop})"
-                        : "区域：全屏";
-
-                    StatusBarConfig.Text = $"视频：{_config.VideoResolutionScale}%分辨率，{_config.VideoFrameRate}fps，H.264 | " +
-                                           $"音频：{_config.AudioSampleRate / 1000}kHz，{_config.AudioBitrate}kbps | {regionInfo}";
+                    string statusText = $"屏幕变化率: -- | " +
+                                       $"录制间隔: {_config.ScreenshotInterval}秒 | " +
+                                       $"截图数量: {_screenshotCount} (请启用截图功能)";
+                    UpdateStatusDisplayWithScroll(statusText, System.Windows.Media.Brushes.Orange);
+                    return;
+                }
+                
+                // 计算距离下次检查的剩余时间
+                DateTime now = DateTime.Now;
+                TimeSpan elapsed = now - _lastScreenshotTime;
+                int remainingSeconds = Math.Max(0, _config.ScreenshotInterval - (int)elapsed.TotalSeconds);
+                
+                // 始终显示实时的屏幕变化率（比较当前画面和上一次检查时的画面）
+                string mainStatusText = $"屏幕变化率: {_currentScreenChangeRate:F2}% | " +
+                                       $"录制间隔: {_config.ScreenshotInterval}秒 | " +
+                                       $"截图数量: {_screenshotCount}";
+                
+                // 使用Inlines来设置不同颜色的文本
+                if (StatusBarInfo != null)
+                {
+                    StatusBarInfo.Inlines.Clear();
+                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(mainStatusText) 
+                    { 
+                        Foreground = System.Windows.Media.Brushes.Green 
+                    });
+                    
+                    if (remainingSeconds > 0 && _lastScreenshot != null)
+                    {
+                        // 如果间隔时间未到达，在变化率后面显示剩余时间（使用蓝色以示区分）
+                        StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run($" (下次检查: {remainingSeconds}秒后)") 
+                        { 
+                            Foreground = System.Windows.Media.Brushes.Blue 
+                        });
+                    }
+                    
+                    // 检查是否需要滚动
+                    CheckAndStartScrolling();
                 }
             }
             catch (Exception ex)
             {
-                WriteError($"更新配置显示失败", ex);
+                WriteError($"更新录制状态失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 更新状态栏显示（合并配置信息和状态信息为一行，用不同颜色显示）
+        /// </summary>
+        /// <param name="statusText">状态文本，如果为null则使用当前状态</param>
+        private void UpdateStatusDisplay(string? statusText = null)
+        {
+            try
+            {
+                if (StatusBarInfo != null)
+                {
+                    // 如果正在录制，显示录制状态
+                    if (_isVideoRecording && statusText == null)
+                    {
+                        UpdateRecordingStatus();
+                        return;
+                    }
+
+                    // 如果正在停止录制，显示当前操作
+                    if (!string.IsNullOrEmpty(_currentOperation))
+                    {
+                        UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                        return;
+                    }
+
+                    // 配置信息（蓝色）
+                    string regionInfo = HasValidCustomRegion()
+                        ? $"{_config.RegionWidth}x{_config.RegionHeight}"
+                        : "全屏";
+                    string configText = $"{_config.VideoResolutionScale}% {_config.VideoFrameRate}fps | " +
+                                       $"{_config.AudioSampleRate / 1000}kHz {_config.AudioBitrate}kbps | {regionInfo}";
+
+                    // 状态信息（绿色表示正常，橙色表示警告，红色表示错误）
+                    string status = statusText ?? "就绪";
+                    System.Windows.Media.Brush statusColor = System.Windows.Media.Brushes.Green;
+                    
+                    // 根据状态文本判断颜色
+                    if (status.Contains("失败") || status.Contains("错误"))
+                    {
+                        statusColor = System.Windows.Media.Brushes.Red;
+                    }
+                    else if (status.Contains("警告") || status.Contains("正在"))
+                    {
+                        statusColor = System.Windows.Media.Brushes.Orange;
+                    }
+
+                    // 使用 Inlines 显示不同颜色的文本
+                    StatusBarInfo.Inlines.Clear();
+                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(configText) 
+                    { 
+                        Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 102, 204)) // #0066CC
+                    });
+                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(" | ") 
+                    { 
+                        Foreground = System.Windows.Media.Brushes.Gray 
+                    });
+                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(status) 
+                    { 
+                        Foreground = statusColor 
+                    });
+                    
+                    // 检查是否需要滚动
+                    CheckAndStartScrolling();
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新状态显示失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 更新状态显示（带滚动支持）
+        /// </summary>
+        private void UpdateStatusDisplayWithScroll(string statusText, System.Windows.Media.Brush color)
+        {
+            try
+            {
+                if (StatusBarInfo != null)
+                {
+                    StatusBarInfo.Inlines.Clear();
+                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(statusText) 
+                    { 
+                        Foreground = color 
+                    });
+                    
+                    // 检查是否需要滚动
+                    CheckAndStartScrolling();
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新状态显示失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 检查并启动滚动动画（跑马灯效果）
+        /// </summary>
+        private void CheckAndStartScrolling()
+        {
+            try
+            {
+                if (StatusBarInfo != null && StatusBarScrollViewer != null)
+                {
+                    // 使用Dispatcher延迟检查，确保布局已完成
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try
+                        {
+                            // 等待布局完成
+                            StatusBarInfo.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+                            double textWidth = StatusBarInfo.DesiredSize.Width;
+                            double scrollViewerWidth = StatusBarScrollViewer.ActualWidth;
+                            
+                            // 如果文本宽度超过ScrollViewer宽度，启动滚动动画
+                            if (textWidth > scrollViewerWidth && scrollViewerWidth > 0)
+                            {
+                                StartScrollingAnimation(textWidth - scrollViewerWidth);
+                            }
+                            else
+                            {
+                                StopScrollingAnimation();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            WriteError($"延迟检查滚动状态失败", ex);
+                        }
+                    }), System.Windows.Threading.DispatcherPriority.Loaded);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"检查滚动状态失败", ex);
+            }
+        }
+
+        private System.Windows.Media.Animation.Storyboard? _scrollingStoryboard;
+
+        /// <summary>
+        /// 启动滚动动画（使用Transform实现）
+        /// </summary>
+        private void StartScrollingAnimation(double scrollDistance)
+        {
+            try
+            {
+                // 如果动画已经在运行，不重复启动
+                if (_scrollingStoryboard != null && _scrollingStoryboard.GetCurrentState() == System.Windows.Media.Animation.ClockState.Active)
+                {
+                    return;
+                }
+
+                StopScrollingAnimation();
+
+                if (StatusBarInfo == null) return;
+
+                // 使用Transform实现滚动效果
+                var transform = new System.Windows.Media.TranslateTransform();
+                StatusBarInfo.RenderTransform = transform;
+
+                // 创建滚动动画
+                _scrollingStoryboard = new System.Windows.Media.Animation.Storyboard();
+                
+                var scrollAnimation = new System.Windows.Media.Animation.DoubleAnimation
+                {
+                    From = 0,
+                    To = -(scrollDistance + 50), // 向左滚动
+                    Duration = TimeSpan.FromSeconds(5), // 5秒完成一次滚动
+                    RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever,
+                    AutoReverse = true
+                };
+
+                System.Windows.Media.Animation.Storyboard.SetTarget(scrollAnimation, transform);
+                System.Windows.Media.Animation.Storyboard.SetTargetProperty(scrollAnimation, new System.Windows.PropertyPath(System.Windows.Media.TranslateTransform.XProperty));
+                
+                _scrollingStoryboard.Children.Add(scrollAnimation);
+                _scrollingStoryboard.Begin();
+            }
+            catch (Exception ex)
+            {
+                WriteError($"启动滚动动画失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 停止滚动动画
+        /// </summary>
+        private void StopScrollingAnimation()
+        {
+            try
+            {
+                if (_scrollingStoryboard != null)
+                {
+                    _scrollingStoryboard.Stop();
+                    _scrollingStoryboard = null;
+                }
+                if (StatusBarInfo != null && StatusBarInfo.RenderTransform is System.Windows.Media.TranslateTransform transform)
+                {
+                    transform.X = 0;
+                }
+                if (StatusBarScrollViewer != null)
+                {
+                    StatusBarScrollViewer.ScrollToHorizontalOffset(0);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"停止滚动动画失败", ex);
             }
         }
 
@@ -434,35 +853,36 @@ namespace Screenshot_v3_0
         {
             try
             {
-                if (HasValidCustomRegion())
-                {
-                    if (_regionHighlightWindow == null)
-                    {
-                        _regionHighlightWindow = new RegionHighlightWindow();
-                        // 只在主窗口已显示时设置 Owner
-                        if (IsLoaded && IsVisible)
-                        {
-                            _regionHighlightWindow.Owner = this;
-                        }
-                    }
-                    else if (IsLoaded && IsVisible && _regionHighlightWindow.Owner == null)
-                    {
-                        // 如果之前没有设置 Owner，现在设置
-                        _regionHighlightWindow.Owner = this;
-                    }
-
-                    var rect = new Int32Rect(
-                        _config.RegionLeft,
-                        _config.RegionTop,
-                        _config.RegionWidth,
-                        _config.RegionHeight);
-
-                    _regionHighlightWindow.ShowRegion(rect);
-                }
-                else
+                // 如果没有有效的自定义区域，则隐藏
+                if (!HasValidCustomRegion())
                 {
                     _regionHighlightWindow?.HideRegion();
+                    return;
                 }
+
+                // 有有效区域，显示矩形框
+                if (_regionHighlightWindow == null)
+                {
+                    _regionHighlightWindow = new RegionHighlightWindow();
+                    // 只在主窗口已显示时设置 Owner
+                    if (IsLoaded && IsVisible)
+                    {
+                        _regionHighlightWindow.Owner = this;
+                    }
+                }
+                else if (IsLoaded && IsVisible && _regionHighlightWindow.Owner == null)
+                {
+                    // 如果之前没有设置 Owner，现在设置
+                    _regionHighlightWindow.Owner = this;
+                }
+
+                var rect = new Int32Rect(
+                    _config.RegionLeft,
+                    _config.RegionTop,
+                    _config.RegionWidth,
+                    _config.RegionHeight);
+
+                _regionHighlightWindow.ShowRegion(rect);
             }
             catch (Exception ex)
             {
@@ -477,10 +897,7 @@ namespace Screenshot_v3_0
             {
                 if (_isVideoRecording)
                 {
-                    if (StatusBarInfo != null)
-                    {
-                        StatusBarInfo.Text = "请先停止录制，再调整录制区域";
-                    }
+                    UpdateStatusDisplay("请先停止录制，再调整录制区域");
                     return;
                 }
 
@@ -515,10 +932,7 @@ namespace Screenshot_v3_0
                             
                             if (result == MessageBoxResult.No)
                             {
-                                if (StatusBarInfo != null)
-                                {
-                                    StatusBarInfo.Text = "已取消选择区域";
-                                }
+                                UpdateStatusDisplay("已取消选择区域");
                                 return;
                             }
                         }
@@ -530,24 +944,19 @@ namespace Screenshot_v3_0
                         _config.RegionHeight = rect.Height;
                         _config.Save(_configPath);
 
+                        // 用户选择新区域后，总是显示红色矩形框（不受配置影响）
                         UpdateRegionOverlay();
                         UpdateConfigDisplay();
 
                         WriteLine($"选择录制区域: 左上=({rect.X},{rect.Y}), 大小={rect.Width}x{rect.Height}");
-                        if (StatusBarInfo != null)
-                        {
-                            StatusBarInfo.Text = $"已选择区域：{rect.Width}x{rect.Height} @ ({rect.X},{rect.Y})";
-                        }
+                        UpdateStatusDisplay($"已选择区域：{rect.Width}x{rect.Height} @ ({rect.X},{rect.Y})");
                     }
                 }
             }
             catch (Exception ex)
             {
                 WriteError($"选择录制区域失败", ex);
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = $"选择录制区域失败：{ex.Message}";
-                }
+                UpdateStatusDisplay($"选择录制区域失败：{ex.Message}");
             }
             finally
             {
@@ -562,45 +971,6 @@ namespace Screenshot_v3_0
                 catch
                 {
                     // 忽略关闭错误
-                }
-            }
-        }
-
-        private void BtnClearRegion_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                if (_isVideoRecording)
-                {
-                    if (StatusBarInfo != null)
-                    {
-                        StatusBarInfo.Text = "录制中无法清除区域，请先停止录制";
-                    }
-                    return;
-                }
-
-                _config.UseCustomRegion = false;
-                _config.RegionLeft = 0;
-                _config.RegionTop = 0;
-                _config.RegionWidth = 0;
-                _config.RegionHeight = 0;
-                _config.Save(_configPath);
-
-                UpdateRegionOverlay();
-                UpdateConfigDisplay();
-
-                WriteLine("已清除自定义录制区域设置，恢复全屏录制");
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = "已清除自定义录制区域，恢复全屏";
-                }
-            }
-            catch (Exception ex)
-            {
-                WriteError($"清除录制区域失败", ex);
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = $"清除录制区域失败：{ex.Message}";
                 }
             }
         }
@@ -625,6 +995,100 @@ namespace Screenshot_v3_0
 
         [DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int nIndex);
+
+        /// <summary>
+        /// 初始化界面上的设置输入框
+        /// </summary>
+        private void InitializeSettingsControls()
+        {
+            try
+            {
+                if (TxtScreenChangeRate != null)
+                {
+                    TxtScreenChangeRate.Text = _config.ScreenChangeRate.ToString("F2");
+                }
+                if (TxtScreenshotInterval != null)
+                {
+                    TxtScreenshotInterval.Text = _config.ScreenshotInterval.ToString();
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"初始化设置控件失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 屏幕变化率输入框文本更改事件
+        /// </summary>
+        private void TxtScreenChangeRate_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            try
+            {
+                if (TxtScreenChangeRate != null && double.TryParse(TxtScreenChangeRate.Text, out double value))
+                {
+                    // 验证范围：1-1000
+                    if (value < 1)
+                    {
+                        value = 1;
+                        TxtScreenChangeRate.Text = "1";
+                    }
+                    else if (value > 1000)
+                    {
+                        value = 1000;
+                        TxtScreenChangeRate.Text = "1000";
+                    }
+                    
+                    // 更新配置并保存
+                    if (Math.Abs(_config.ScreenChangeRate - value) > 0.01) // 避免频繁保存（浮点数比较）
+                    {
+                        _config.ScreenChangeRate = value;
+                        _config.Save(_configPath);
+                        WriteLine($"屏幕变化率已更新: {value:F2}%");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新屏幕变化率失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 截图间隔输入框文本更改事件
+        /// </summary>
+        private void TxtScreenshotInterval_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            try
+            {
+                if (TxtScreenshotInterval != null && int.TryParse(TxtScreenshotInterval.Text, out int value))
+                {
+                    // 验证范围：1-65535
+                    if (value < 1)
+                    {
+                        value = 1;
+                        TxtScreenshotInterval.Text = "1";
+                    }
+                    else if (value > 65535)
+                    {
+                        value = 65535;
+                        TxtScreenshotInterval.Text = "65535";
+                    }
+                    
+                    // 更新配置并保存
+                    if (_config.ScreenshotInterval != value)
+                    {
+                        _config.ScreenshotInterval = value;
+                        _config.Save(_configPath);
+                        WriteLine($"截图间隔已更新: {value}秒");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新截图间隔失败", ex);
+            }
+        }
 
         /// <summary>
         /// 更新日志菜单项状态
@@ -656,6 +1120,33 @@ namespace Screenshot_v3_0
             catch (Exception ex)
             {
                 WriteError($"更新日志菜单项状态失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 更新PPT和PDF菜单项状态
+        /// </summary>
+        private void UpdatePPTAndPDFMenuItems()
+        {
+            try
+            {
+                // 如果截图功能未开启，禁用PPT和PDF菜单项
+                bool isEnabled = _isScreenshotEnabled;
+                
+                if (MenuGeneratePPT != null)
+                {
+                    MenuGeneratePPT.IsChecked = _config.GeneratePPT;
+                    MenuGeneratePPT.IsEnabled = isEnabled;
+                }
+                if (MenuGeneratePDF != null)
+                {
+                    MenuGeneratePDF.IsChecked = _config.GeneratePDF;
+                    MenuGeneratePDF.IsEnabled = isEnabled;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新PPT和PDF菜单项状态失败", ex);
             }
         }
 
@@ -693,10 +1184,7 @@ namespace Screenshot_v3_0
                 Logger.Enabled = true;
                 UpdateLogMenuItems();
                 SaveLogConfig();
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = "日志已启用";
-                }
+                UpdateStatusDisplay("日志已启用");
             }
             catch (Exception ex)
             {
@@ -712,10 +1200,7 @@ namespace Screenshot_v3_0
                 Logger.Enabled = false;
                 UpdateLogMenuItems();
                 SaveLogConfig();
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = "日志已禁用";
-                }
+                UpdateStatusDisplay("日志已禁用");
             }
             catch (Exception ex)
             {
@@ -730,10 +1215,7 @@ namespace Screenshot_v3_0
                 _config.LogFileMode = 0;
                 UpdateLogMenuItems();
                 SaveLogConfig();
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = "日志文件模式：覆盖";
-                }
+                UpdateStatusDisplay("日志文件模式：覆盖");
             }
             catch (Exception ex)
             {
@@ -748,14 +1230,441 @@ namespace Screenshot_v3_0
                 _config.LogFileMode = 1;
                 UpdateLogMenuItems();
                 SaveLogConfig();
-                if (StatusBarInfo != null)
-                {
-                    StatusBarInfo.Text = "日志文件模式：叠加";
-                }
+                UpdateStatusDisplay("日志文件模式：叠加");
             }
             catch (Exception ex)
             {
                 WriteError($"设置日志文件叠加模式失败", ex);
+            }
+        }
+
+        private void MenuScreenshot_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _isScreenshotEnabled = MenuScreenshot.IsChecked;
+                
+                if (_isScreenshotEnabled)
+                {
+                    // 启动截图定时器
+                    if (_screenshotTimer != null)
+                    {
+                        // 设置定时器间隔为1秒，但实际检查逻辑会按照配置的间隔执行
+                        _screenshotTimer.Interval = TimeSpan.FromSeconds(1);
+                        _screenshotTimer.Start();
+                        _lastScreenshotTime = DateTime.Now;
+                        // 立即初始化 _lastScreenshot，作为第一次检查的基准画面
+                        UpdateLastScreenshot();
+                        
+                        // 重置PPT/PDF初始化状态，准备创建新的PPT/PDF文件
+                        _pptPdfInitialized = false;
+                        _pptGenerator?.Dispose();
+                        _pdfGenerator?.Dispose();
+                        _pptGenerator = null;
+                        _pdfGenerator = null;
+                        
+                        WriteLine("截图功能已启用");
+                        UpdateStatusDisplay("截图功能已启用");
+                    }
+                }
+                else
+                {
+                    // 停止截图定时器
+                    if (_screenshotTimer != null)
+                    {
+                        _screenshotTimer.Stop();
+                    }
+                    _lastScreenshot?.Dispose();
+                    _lastScreenshot = null;
+                    
+                    // 完成并释放PPT/PDF生成器
+                    FinalizePPTAndPDF();
+                    
+                    WriteLine("截图功能已禁用");
+                    UpdateStatusDisplay("截图功能已禁用");
+                }
+                
+                // 更新PPT和PDF菜单项的启用状态
+                UpdatePPTAndPDFMenuItems();
+            }
+            catch (Exception ex)
+            {
+                WriteError($"切换截图功能失败", ex);
+                UpdateStatusDisplay($"切换截图功能失败：{ex.Message}");
+            }
+        }
+
+        private void MenuGeneratePPT_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _config.GeneratePPT = MenuGeneratePPT.IsChecked;
+                _config.Save(_configPath);
+                WriteLine($"生成PPT: {(_config.GeneratePPT ? "启用" : "禁用")}");
+                UpdateStatusDisplay($"生成PPT: {(_config.GeneratePPT ? "已启用" : "已禁用")}");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"切换生成PPT功能失败", ex);
+                UpdateStatusDisplay($"切换生成PPT功能失败：{ex.Message}");
+            }
+        }
+
+        private void MenuGeneratePDF_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _config.GeneratePDF = MenuGeneratePDF.IsChecked;
+                _config.Save(_configPath);
+                WriteLine($"生成PDF: {(_config.GeneratePDF ? "启用" : "禁用")}");
+                UpdateStatusDisplay($"生成PDF: {(_config.GeneratePDF ? "已启用" : "已禁用")}");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"切换生成PDF功能失败", ex);
+                UpdateStatusDisplay($"切换生成PDF功能失败：{ex.Message}");
+            }
+        }
+
+        private void MenuShowRegionOverlay_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _config.ShowRegionOverlay = MenuShowRegionOverlay.IsChecked;
+                _config.Save(_configPath);
+                WriteLine($"启动时显示录制区域: {(_config.ShowRegionOverlay ? "启用" : "禁用")}");
+                UpdateStatusDisplay($"启动时显示录制区域: {(_config.ShowRegionOverlay ? "已启用" : "已禁用")}");
+                
+                // 注意：这个配置只影响启动时的行为
+                // 如果当前已经有区域且正在显示，菜单切换不会立即隐藏（因为用户可能刚选择了区域）
+                // 如果用户想隐藏，可以通过其他方式，或者下次启动时才会应用这个配置
+            }
+            catch (Exception ex)
+            {
+                WriteError($"切换显示录制区域功能失败", ex);
+                UpdateStatusDisplay($"切换显示录制区域功能失败：{ex.Message}");
+            }
+        }
+
+        private void ScreenshotTimer_Tick(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (!_isScreenshotEnabled) return;
+
+                DateTime now = DateTime.Now;
+                TimeSpan elapsed = now - _lastScreenshotTime;
+                
+                // 持续计算屏幕变化率（用于实时显示）
+                // 这比较的是"上一次检查时的画面"（间隔时间前的画面）和"当前画面"的变化率
+                // 注意：这里不更新 _lastScreenshot，只计算变化率用于显示
+                double changeRate = CalculateScreenChangeRateForDisplay();
+                _currentScreenChangeRate = changeRate;
+                
+                // 检查是否到了截图间隔时间
+                if (elapsed.TotalSeconds >= _config.ScreenshotInterval)
+                {
+                    // 间隔时间到达，检查是否需要截图
+                    if (changeRate >= _config.ScreenChangeRate || _lastScreenshot == null)
+                    {
+                        // 屏幕变化率超过阈值，执行截图
+                        CaptureScreenshot();
+                    }
+                    
+                    // 间隔时间到达，更新 _lastScreenshot 为当前画面（保存为"上一次检查时的画面"）
+                    UpdateLastScreenshot();
+                    _lastScreenshotTime = now;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"截图定时器处理失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 计算屏幕变化率（仅用于显示，不更新 _lastScreenshot）
+        /// 比较"上一次检查时的画面"（间隔时间前的画面）和"当前画面"的变化率
+        /// </summary>
+        private double CalculateScreenChangeRateForDisplay()
+        {
+            Bitmap? currentScreenshot = null;
+            try
+            {
+                // 获取当前屏幕截图
+                currentScreenshot = CaptureScreenBitmap();
+                
+                if (_lastScreenshot == null)
+                {
+                    // 第一次，还没有基准画面，返回最大值
+                    currentScreenshot?.Dispose();
+                    return 1000;
+                }
+
+                // 比较两张图片的差异（参考Python代码的pixel_diff函数）
+                // Python逻辑：np.any(diff > 20, axis=2) - 如果任何一个颜色通道的差值超过20，认为像素变化
+                int changedPixels = 0;
+
+                // 为了提高性能，使用采样方式（每5个像素采样一次）
+                // 但计算方式与Python保持一致：检查任何一个通道是否超过20
+                int sampleRate = 5;
+                int sampledPixels = 0;
+                for (int y = 0; y < currentScreenshot.Height; y += sampleRate)
+                {
+                    for (int x = 0; x < currentScreenshot.Width; x += sampleRate)
+                    {
+                        Color currentColor = currentScreenshot.GetPixel(x, y);
+                        Color lastColor = _lastScreenshot.GetPixel(x, y);
+                        
+                        // 计算每个颜色通道的差值（参考Python: np.abs(arr1 - arr2)）
+                        int diffR = Math.Abs(currentColor.R - lastColor.R);
+                        int diffG = Math.Abs(currentColor.G - lastColor.G);
+                        int diffB = Math.Abs(currentColor.B - lastColor.B);
+                        
+                        // Python逻辑：np.any(diff > 20, axis=2) - 如果任何一个通道差值超过20，认为像素变化
+                        if (diffR > 20 || diffG > 20 || diffB > 20)
+                        {
+                            changedPixels++;
+                        }
+                        sampledPixels++;
+                    }
+                }
+
+                // 计算变化率（百分比）：基于采样像素的变化率
+                // Python逻辑：rate = (changed_count / total) * 100
+                double sampledChangeRate = (changedPixels / (double)sampledPixels) * 100.0;
+                
+                // 释放当前截图（不更新 _lastScreenshot）
+                currentScreenshot?.Dispose();
+                
+                return sampledChangeRate;
+            }
+            catch (Exception ex)
+            {
+                WriteError($"计算屏幕变化率失败", ex);
+                currentScreenshot?.Dispose(); // 确保在异常时释放资源
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// 更新 _lastScreenshot 为当前画面（仅在间隔时间到达时调用）
+        /// </summary>
+        private void UpdateLastScreenshot()
+        {
+            try
+            {
+                Bitmap? currentScreenshot = CaptureScreenBitmap();
+                _lastScreenshot?.Dispose();
+                _lastScreenshot = currentScreenshot;
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新上次截图失败", ex);
+            }
+        }
+
+        private Bitmap CaptureScreenBitmap()
+        {
+            try
+            {
+                // 如果设置了框选区域，只捕获框选区域；否则捕获整个屏幕
+                if (HasValidCustomRegion())
+                {
+                    int width = _config.RegionWidth;
+                    int height = _config.RegionHeight;
+                    Bitmap bitmap = new Bitmap(width, height);
+                    using (Graphics graphics = Graphics.FromImage(bitmap))
+                    {
+                        graphics.CopyFromScreen(
+                            _config.RegionLeft, 
+                            _config.RegionTop, 
+                            0, 
+                            0, 
+                            new System.Drawing.Size(width, height)
+                        );
+                    }
+                    return bitmap;
+                }
+                else
+                {
+                    // 没有框选区域，捕获整个屏幕
+                    var (screenWidth, screenHeight) = GetPrimaryScreenPixelSize();
+                    Bitmap bitmap = new Bitmap(screenWidth, screenHeight);
+                    using (Graphics graphics = Graphics.FromImage(bitmap))
+                    {
+                        graphics.CopyFromScreen(0, 0, 0, 0, new System.Drawing.Size(screenWidth, screenHeight));
+                    }
+                    return bitmap;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"捕获屏幕位图失败", ex);
+                throw;
+            }
+        }
+
+        private void CaptureScreenshot()
+        {
+            try
+            {
+                int width, height;
+                Bitmap bitmap;
+                
+                // 如果设置了框选区域，只捕获框选区域；否则捕获整个屏幕
+                if (HasValidCustomRegion())
+                {
+                    width = _config.RegionWidth;
+                    height = _config.RegionHeight;
+                    bitmap = new Bitmap(width, height);
+                    using (Graphics graphics = Graphics.FromImage(bitmap))
+                    {
+                        graphics.CopyFromScreen(
+                            _config.RegionLeft, 
+                            _config.RegionTop, 
+                            0, 
+                            0, 
+                            new System.Drawing.Size(width, height)
+                        );
+                    }
+                }
+                else
+                {
+                    var (screenWidth, screenHeight) = GetPrimaryScreenPixelSize();
+                    width = screenWidth;
+                    height = screenHeight;
+                    bitmap = new Bitmap(width, height);
+                    using (Graphics graphics = Graphics.FromImage(bitmap))
+                    {
+                        graphics.CopyFromScreen(0, 0, 0, 0, new System.Drawing.Size(width, height));
+                    }
+                }
+                
+                using (bitmap)
+                {
+                    // 生成文件名：Picyymmddhhmmss.jpg
+                    string fileName = $"Pic{DateTime.Now:yyMMddHHmmss}.jpg";
+                    string filePath = Path.Combine(_screenshotDir, fileName);
+                    
+                    // 保存为JPG格式
+                    ImageCodecInfo? jpegCodec = ImageCodecInfo.GetImageEncoders()
+                        .FirstOrDefault(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
+                    
+                    if (jpegCodec != null)
+                    {
+                        EncoderParameters encoderParams = new EncoderParameters(1);
+                        encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 90L); // 90%质量
+                        bitmap.Save(filePath, jpegCodec, encoderParams);
+                        encoderParams.Dispose();
+                    }
+                    else
+                    {
+                        // 如果没有找到JPEG编码器，使用默认方式保存
+                        bitmap.Save(filePath, ImageFormat.Jpeg);
+                    }
+                    
+                    WriteLine($"截图已保存: {filePath}");
+                    
+                    // 增加截图计数
+                    _screenshotCount++;
+                    
+                    // 如果启用了PPT或PDF生成，立即添加到PPT/PDF
+                    if (_config.GeneratePPT || _config.GeneratePDF)
+                    {
+                        InitializePPTAndPDF(width, height);
+                        
+                        if (_config.GeneratePPT && _pptGenerator != null)
+                        {
+                            try
+                            {
+                                _pptGenerator.AddImage(filePath);
+                            }
+                            catch (Exception ex)
+                            {
+                                WriteError($"添加图片到PPT失败", ex);
+                            }
+                        }
+                        
+                        if (_config.GeneratePDF && _pdfGenerator != null)
+                        {
+                            try
+                            {
+                                _pdfGenerator.AddImage(filePath);
+                            }
+                            catch (Exception ex)
+                            {
+                                WriteError($"添加图片到PDF失败", ex);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"截图保存失败", ex);
+            }
+        }
+
+        private void InitializePPTAndPDF(int width, int height)
+        {
+            if (_pptPdfInitialized) return;
+            
+            try
+            {
+                if (_config.GeneratePPT)
+                {
+                    string timestamp = DateTime.Now.ToString("yyMMddHHmmss");
+                    _pptFilePath = Path.Combine(_screenshotDir, $"Pic{timestamp}.pptx");
+                    _pptGenerator = new PPTGenerator(_pptFilePath, width, height);
+                    _pptGenerator.Initialize();
+                    WriteLine($"PPT生成器已初始化: {_pptFilePath}");
+                }
+                
+                if (_config.GeneratePDF)
+                {
+                    string timestamp = DateTime.Now.ToString("yyMMddHHmmss");
+                    _pdfFilePath = Path.Combine(_screenshotDir, $"Pic{timestamp}.pdf");
+                    _pdfGenerator = new PDFGenerator(_pdfFilePath, width, height);
+                    _pdfGenerator.Initialize();
+                    WriteLine($"PDF生成器已初始化: {_pdfFilePath}");
+                }
+                
+                _pptPdfInitialized = true;
+            }
+            catch (Exception ex)
+            {
+                WriteError($"初始化PPT/PDF生成器失败", ex);
+            }
+        }
+
+        private void FinalizePPTAndPDF()
+        {
+            try
+            {
+                if (_config.GeneratePPT && _pptGenerator != null)
+                {
+                    _pptGenerator.Finish();
+                    WriteLine($"PPT文件已生成: {_pptFilePath}");
+                }
+                
+                if (_config.GeneratePDF && _pdfGenerator != null)
+                {
+                    _pdfGenerator.Finish();
+                    WriteLine($"PDF文件已生成: {_pdfFilePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"完成PPT/PDF生成失败", ex);
+            }
+            finally
+            {
+                _pptGenerator?.Dispose();
+                _pdfGenerator?.Dispose();
+                _pptGenerator = null;
+                _pdfGenerator = null;
+                _pptPdfInitialized = false;
             }
         }
     }

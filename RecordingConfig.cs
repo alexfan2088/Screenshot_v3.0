@@ -30,6 +30,17 @@ namespace Screenshot_v3_0
         public int RegionWidth { get; set; }
         public int RegionHeight { get; set; }
 
+        // 截图参数
+        public double ScreenChangeRate { get; set; } = 11.12; // 屏幕变化率 1-1000%，默认11.12%
+        public int ScreenshotInterval { get; set; } = 10; // 截图间隔 1-65535秒，默认10秒
+        
+        // PPT和PDF生成参数
+        public bool GeneratePPT { get; set; } = true; // 生成PPT，默认启用
+        public bool GeneratePDF { get; set; } = false; // 生成PDF，默认禁用
+        
+        // 区域显示参数
+        public bool ShowRegionOverlay { get; set; } = false; // 显示上次记录的矩形框，默认不显示
+
         /// <summary>
         /// 获取视频码率（Mbps）
         /// </summary>
