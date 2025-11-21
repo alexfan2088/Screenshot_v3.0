@@ -35,6 +35,9 @@ namespace Screenshot_v3_0
         private string? _pdfFilePath;
         private bool _pptPdfInitialized = false;
         
+        // 当前录制的文件路径
+        private string? _currentVideoPath;
+        
         // 录制状态信息
         private DateTime _recordingStartTime;
         private int _screenshotCount = 0;
@@ -42,6 +45,10 @@ namespace Screenshot_v3_0
         private string _currentOperation = "";
         private double _currentScreenChangeRate = 0.0; // 实时检测到的屏幕变化率
         private bool _isStoppingRecording = false;
+        
+        // 录制时长控制
+        private int _recordingDurationMinutes = 60; // 默认60分钟
+        private DispatcherTimer? _durationCheckTimer; // 检查录制时长的定时器
 
         public MainWindow()
         {
@@ -52,7 +59,10 @@ namespace Screenshot_v3_0
             
             // 设置窗口初始位置在屏幕顶部居中
             this.WindowStartupLocation = WindowStartupLocation.Manual;
-            this.Left = (SystemParameters.PrimaryScreenWidth - this.Width) / 2;
+            // 设置窗口宽度为屏幕宽度的80%
+            double screenWidth = SystemParameters.PrimaryScreenWidth;
+            this.Width = screenWidth * 0.8;
+            this.Left = (screenWidth - this.Width) / 2;
             this.Top = 10; // 距离顶部10像素
             
             // 添加窗口拖拽功能（无边框窗口需要手动实现）
@@ -284,6 +294,7 @@ namespace Screenshot_v3_0
                 }
 
                 var videoPath = Path.Combine(_workDir, $"video{DateTime.Now:yyMMddHHmmss}.mp4");
+                _currentVideoPath = videoPath; // 保存当前视频文件路径
 
                 int videoWidth;
                 int videoHeight;
@@ -394,6 +405,16 @@ namespace Screenshot_v3_0
                 _statusUpdateTimer.Interval = TimeSpan.FromMilliseconds(500); // 每500ms更新一次
                 _statusUpdateTimer.Tick += StatusUpdateTimer_Tick;
                 _statusUpdateTimer.Start();
+                
+                // 启动录制时长检查定时器（如果设置了时长限制）
+                if (_recordingDurationMinutes > 0)
+                {
+                    _durationCheckTimer = new DispatcherTimer();
+                    _durationCheckTimer.Interval = TimeSpan.FromSeconds(1); // 每秒检查一次
+                    _durationCheckTimer.Tick += DurationCheckTimer_Tick;
+                    _durationCheckTimer.Start();
+                    WriteLine($"录制时长限制: {_recordingDurationMinutes}分钟");
+                }
 
                 // 启动截图定时器（只有在开始录制时才启动）
                 if (_isScreenshotEnabled && _screenshotTimer != null)
@@ -443,9 +464,13 @@ namespace Screenshot_v3_0
                 _statusUpdateTimer?.Stop();
                 _statusUpdateTimer = null;
                 
+                // 停止录制时长检查定时器
+                _durationCheckTimer?.Stop();
+                _durationCheckTimer = null;
+                
                 // 立即更新状态显示
                 _currentOperation = "正在停止录制...";
-                UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
 
                 // 在后台线程执行停止操作，避免阻塞 UI
                 ThreadPool.QueueUserWorkItem(_ =>
@@ -467,10 +492,11 @@ namespace Screenshot_v3_0
                         _audioRecorder.Stop();
                         
                         // 更新状态：正在生成MP4文件
+                        string videoFileName = _currentVideoPath != null ? Path.GetFileName(_currentVideoPath) : "video*.mp4";
                         Dispatcher.Invoke(() =>
                         {
-                            _currentOperation = "正在生成MP4文件...";
-                            UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                            _currentOperation = $"正在生成{videoFileName}文件";
+                            UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                         });
                         
                         // 等待音频管道数据刷新（实时合成模式）或音频文件写入完成（文件合并模式）
@@ -516,23 +542,31 @@ namespace Screenshot_v3_0
                         _videoEncoder?.Dispose();
 
                         // 完成PPT和PDF生成（在MP4生成完成后立即执行）
+                        List<string> generatedFiles = new List<string>();
+                        if (File.Exists(_currentVideoPath))
+                        {
+                            generatedFiles.Add(Path.GetFileName(_currentVideoPath));
+                        }
+                        
                         if (_config.GeneratePPT || _config.GeneratePDF)
                         {
-                            if (_config.GeneratePPT)
+                            if (_config.GeneratePPT && _pptFilePath != null)
                             {
+                                string pptFileName = Path.GetFileName(_pptFilePath);
                                 Dispatcher.Invoke(() =>
                                 {
-                                    _currentOperation = "正在生成PPT文件...";
-                                    UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                                    _currentOperation = $"正在生成{pptFileName}文件";
+                                    UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                                 });
                             }
                             
-                            if (_config.GeneratePDF)
+                            if (_config.GeneratePDF && _pdfFilePath != null)
                             {
+                                string pdfFileName = Path.GetFileName(_pdfFilePath);
                                 Dispatcher.Invoke(() =>
                                 {
-                                    _currentOperation = "正在生成PDF文件...";
-                                    UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                                    _currentOperation = $"正在生成{pdfFileName}文件";
+                                    UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                                 });
                             }
                         }
@@ -540,6 +574,16 @@ namespace Screenshot_v3_0
                         WriteLine($"准备完成PPT和PDF生成");
                         FinalizePPTAndPDF();
                         WriteLine($"PPT和PDF生成完成");
+                        
+                        // 收集所有生成的文件名
+                        if (_config.GeneratePPT && _pptFilePath != null && File.Exists(_pptFilePath))
+                        {
+                            generatedFiles.Add(Path.GetFileName(_pptFilePath));
+                        }
+                        if (_config.GeneratePDF && _pdfFilePath != null && File.Exists(_pdfFilePath))
+                        {
+                            generatedFiles.Add(Path.GetFileName(_pdfFilePath));
+                        }
 
                         // 在 UI 线程更新界面
                         Dispatcher.Invoke(() =>
@@ -560,7 +604,19 @@ namespace Screenshot_v3_0
                             // 清除当前操作，恢复正常状态显示
                             _isStoppingRecording = false;
                             _currentOperation = "";
-                            UpdateStatusDisplay("视频录制已停止");
+                            
+                            // 显示成功消息（只显示成功消息，不显示配置信息）
+                            if (generatedFiles.Count > 0)
+                            {
+                                UpdateStatusDisplayOnly("恭喜，所有文件正确生成", new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 235))); // 天蓝色
+                            }
+                            else
+                            {
+                                UpdateStatusDisplay("视频录制已停止");
+                            }
+                            
+                            // 清除当前视频路径
+                            _currentVideoPath = null;
                         });
                     }
                     catch (Exception ex)
@@ -621,6 +677,48 @@ namespace Screenshot_v3_0
         }
 
         /// <summary>
+        /// 录制时长检查定时器事件
+        /// </summary>
+        private void DurationCheckTimer_Tick(object? sender, EventArgs e)
+        {
+            try
+            {
+                if (!_isVideoRecording || _isStoppingRecording || _recordingDurationMinutes <= 0)
+                {
+                    return;
+                }
+
+                DateTime now = DateTime.Now;
+                TimeSpan elapsed = now - _recordingStartTime;
+                int elapsedSeconds = (int)elapsed.TotalSeconds;
+                int durationSeconds = _recordingDurationMinutes * 60;
+
+                // 检查是否到达录制时长
+                if (elapsedSeconds >= durationSeconds)
+                {
+                    WriteLine($"录制时长已到达 {_recordingDurationMinutes} 分钟，自动停止录制");
+                    
+                    // 停止时长检查定时器
+                    _durationCheckTimer?.Stop();
+                    _durationCheckTimer = null;
+                    
+                    // 自动停止录制
+                    Dispatcher.Invoke(() =>
+                    {
+                        if (_isVideoRecording && !_isStoppingRecording)
+                        {
+                            BtnStopVideo_Click(BtnStopVideo, new RoutedEventArgs());
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"录制时长检查失败", ex);
+            }
+        }
+
+        /// <summary>
         /// 更新录制状态显示
         /// </summary>
         private void UpdateRecordingStatus()
@@ -631,9 +729,34 @@ namespace Screenshot_v3_0
                 {
                     if (!string.IsNullOrEmpty(_currentOperation))
                     {
-                        UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                        UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                     }
                     return;
+                }
+
+                // 计算录制已用时间和剩余时间
+                DateTime now = DateTime.Now;
+                TimeSpan recordingElapsed = now - _recordingStartTime;
+                string timeInfo = "";
+                if (_recordingDurationMinutes > 0)
+                {
+                    int remainingRecordingSeconds = _recordingDurationMinutes * 60 - (int)recordingElapsed.TotalSeconds;
+                    if (remainingRecordingSeconds > 0)
+                    {
+                        int mins = remainingRecordingSeconds / 60;
+                        int secs = remainingRecordingSeconds % 60;
+                        timeInfo = $" | 剩余: {mins}分{secs}秒";
+                    }
+                    else
+                    {
+                        timeInfo = " | 剩余: 0秒";
+                    }
+                }
+                else
+                {
+                    int elapsedMinutes = (int)recordingElapsed.TotalMinutes;
+                    int elapsedSeconds = (int)recordingElapsed.TotalSeconds % 60;
+                    timeInfo = $" | 已录制: {elapsedMinutes}分{elapsedSeconds}秒";
                 }
 
                 // 如果截图功能未启用，显示提示信息
@@ -641,36 +764,56 @@ namespace Screenshot_v3_0
                 {
                     string statusText = $"屏幕变化率: -- | " +
                                        $"录制间隔: {_config.ScreenshotInterval}秒 | " +
-                                       $"截图数量: {_screenshotCount} (请启用截图功能)";
-                    UpdateStatusDisplayWithScroll(statusText, System.Windows.Media.Brushes.Orange);
+                                       $"截图数量: {_screenshotCount} (请启用截图功能){timeInfo}";
+                    UpdateStatusDisplayWithScroll(statusText, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                     return;
                 }
                 
                 // 计算距离下次检查的剩余时间
-                DateTime now = DateTime.Now;
                 TimeSpan elapsed = now - _lastScreenshotTime;
-                int remainingSeconds = Math.Max(0, _config.ScreenshotInterval - (int)elapsed.TotalSeconds);
+                int remainingCheckSeconds = Math.Max(0, _config.ScreenshotInterval - (int)elapsed.TotalSeconds);
                 
                 // 始终显示实时的屏幕变化率（比较当前画面和上一次检查时的画面）
                 string mainStatusText = $"屏幕变化率: {_currentScreenChangeRate:F2}% | " +
                                        $"录制间隔: {_config.ScreenshotInterval}秒 | " +
-                                       $"截图数量: {_screenshotCount}";
+                                       $"截图数量: {_screenshotCount}{timeInfo}";
                 
                 // 使用Inlines来设置不同颜色的文本
                 if (StatusBarInfo != null)
                 {
                     StatusBarInfo.Inlines.Clear();
-                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(mainStatusText) 
-                    { 
-                        Foreground = System.Windows.Media.Brushes.Green 
-                    });
-                    
-                    if (remainingSeconds > 0 && _lastScreenshot != null)
+                    // 使用天蓝色和粉红色交替显示信息
+                    var parts = mainStatusText.Split('|');
+                    for (int i = 0; i < parts.Length; i++)
                     {
-                        // 如果间隔时间未到达，在变化率后面显示剩余时间（使用蓝色以示区分）
-                        StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run($" (下次检查: {remainingSeconds}秒后)") 
+                        string part = parts[i].Trim();
+                        if (string.IsNullOrEmpty(part)) continue;
+                        
+                        // 交替使用天蓝色和粉红色
+                        var color = (i % 2 == 0) 
+                            ? new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 250)) // 天蓝色
+                            : new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)); // 粉红色
+                        StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(part) 
                         { 
-                            Foreground = System.Windows.Media.Brushes.Blue 
+                            Foreground = color 
+                        });
+                        
+                        // 添加分隔符（除了最后一个）
+                        if (i < parts.Length - 1)
+                        {
+                            StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(" | ") 
+                            { 
+                                Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 250)) // 天蓝色
+                            });
+                        }
+                    }
+                    
+                    if (remainingCheckSeconds > 0 && _lastScreenshot != null)
+                    {
+                        // 如果间隔时间未到达，在变化率后面显示剩余时间（使用粉红色）
+                        StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run($" (下次检查: {remainingCheckSeconds}秒后)") 
+                        { 
+                            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)) // 粉红色
                         });
                     }
                     
@@ -688,7 +831,7 @@ namespace Screenshot_v3_0
         /// 更新状态栏显示（合并配置信息和状态信息为一行，用不同颜色显示）
         /// </summary>
         /// <param name="statusText">状态文本，如果为null则使用当前状态</param>
-        private void UpdateStatusDisplay(string? statusText = null)
+        private void UpdateStatusDisplay(string? statusText = null, System.Windows.Media.Brush? statusColor = null)
         {
             try
             {
@@ -696,7 +839,7 @@ namespace Screenshot_v3_0
                 {
                     if (_isStoppingRecording && !string.IsNullOrEmpty(_currentOperation))
                     {
-                        UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                        UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                         return;
                     }
 
@@ -710,7 +853,7 @@ namespace Screenshot_v3_0
                     // 如果正在停止录制，显示当前操作
                     if (!string.IsNullOrEmpty(_currentOperation))
                     {
-                        UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                        UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                         return;
                     }
 
@@ -723,31 +866,59 @@ namespace Screenshot_v3_0
 
                     // 状态信息（绿色表示正常，橙色表示警告，红色表示错误）
                     string status = statusText ?? "就绪";
-                    System.Windows.Media.Brush statusColor = System.Windows.Media.Brushes.Green;
+                    System.Windows.Media.Brush finalStatusColor = statusColor ?? System.Windows.Media.Brushes.Green;
                     
-                    // 根据状态文本判断颜色
-                    if (status.Contains("失败") || status.Contains("错误"))
+                    // 如果没有指定颜色，根据状态文本判断颜色
+                    if (statusColor == null)
                     {
-                        statusColor = System.Windows.Media.Brushes.Red;
-                    }
-                    else if (status.Contains("警告") || status.Contains("正在"))
-                    {
-                        statusColor = System.Windows.Media.Brushes.Orange;
+                        if (status.Contains("失败") || status.Contains("错误"))
+                        {
+                            finalStatusColor = System.Windows.Media.Brushes.Red;
+                        }
+                        else if (status.Contains("警告") || status.Contains("正在"))
+                        {
+                            finalStatusColor = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)); // 粉红色
+                        }
                     }
 
-                    // 使用 Inlines 显示不同颜色的文本
+                    // 使用天蓝色和粉红色显示信息
                     StatusBarInfo.Inlines.Clear();
                     StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(configText) 
                     { 
-                        Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 102, 204)) // #0066CC
+                        Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 250)) // 天蓝色
                     });
                     StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(" | ") 
                     { 
-                        Foreground = System.Windows.Media.Brushes.Gray 
+                        Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 250)) // 天蓝色
                     });
                     StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(status) 
                     { 
-                        Foreground = statusColor 
+                        Foreground = finalStatusColor
+                    });
+                    
+                    // 检查是否需要滚动
+                    CheckAndStartScrolling();
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新状态显示失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 更新状态显示（只显示状态文本，不显示配置信息）
+        /// </summary>
+        private void UpdateStatusDisplayOnly(string statusText, System.Windows.Media.Brush color)
+        {
+            try
+            {
+                if (StatusBarInfo != null)
+                {
+                    StatusBarInfo.Inlines.Clear();
+                    StatusBarInfo.Inlines.Add(new System.Windows.Documents.Run(statusText) 
+                    { 
+                        Foreground = color
                     });
                     
                     // 检查是否需要滚动
@@ -1202,6 +1373,10 @@ namespace Screenshot_v3_0
                 {
                     TxtScreenshotInterval.Text = _config.ScreenshotInterval.ToString();
                 }
+                if (TxtRecordingDuration != null)
+                {
+                    TxtRecordingDuration.Text = _recordingDurationMinutes.ToString();
+                }
             }
             catch (Exception ex)
             {
@@ -1278,6 +1453,41 @@ namespace Screenshot_v3_0
             catch (Exception ex)
             {
                 WriteError($"更新截图间隔失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 录制时长输入框文本更改事件
+        /// </summary>
+        private void TxtRecordingDuration_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+        {
+            try
+            {
+                if (TxtRecordingDuration != null && int.TryParse(TxtRecordingDuration.Text, out int value))
+                {
+                    // 验证范围：0-9999（0表示无限制）
+                    if (value < 0)
+                    {
+                        value = 0;
+                        TxtRecordingDuration.Text = "0";
+                    }
+                    else if (value > 9999)
+                    {
+                        value = 9999;
+                        TxtRecordingDuration.Text = "9999";
+                    }
+                    
+                    // 更新录制时长
+                    if (_recordingDurationMinutes != value)
+                    {
+                        _recordingDurationMinutes = value;
+                        WriteLine($"录制时长已更新: {(_recordingDurationMinutes == 0 ? "无限制" : $"{_recordingDurationMinutes}分钟")}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"录制时长输入框文本更改失败", ex);
             }
         }
 
