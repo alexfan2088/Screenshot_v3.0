@@ -28,8 +28,6 @@
           <MenuItem Header="生成PPT" x:Name="MenuGeneratePPT" IsCheckable="True" IsChecked="True" Click="MenuGeneratePPT_Click"/>
           <MenuItem Header="生成PDF" x:Name="MenuGeneratePDF" IsCheckable="True" IsChecked="False" Click="MenuGeneratePDF_Click"/>
           <Separator/>
-          <MenuItem Header="启动时显示历史录制区域" x:Name="MenuShowRegionOverlay" IsCheckable="True" IsChecked="False" Click="MenuShowRegionOverlay_Click"/>
-          <Separator/>
           <MenuItem Header="日志设置">
             <MenuItem Header="输出日志" x:Name="MenuLogEnabled" IsCheckable="True" IsChecked="True" Click="MenuLogEnabled_Click"/>
             <MenuItem Header="不输出日志" x:Name="MenuLogDisabled" IsCheckable="True" IsChecked="False" Click="MenuLogDisabled_Click"/>

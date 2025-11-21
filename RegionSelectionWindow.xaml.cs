@@ -37,6 +37,9 @@ namespace Screenshot_v3_0
             };
 
             SelectionCanvas.Children.Add(_selectionRectangle);
+            
+            // 窗口显示时立即设置鼠标为十字光标
+            this.Cursor = Cursors.Cross;
         }
 
         private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -72,6 +75,8 @@ namespace Screenshot_v3_0
             if (!_isSelecting) return;
             _isSelecting = false;
             ReleaseMouseCapture();
+            // 恢复默认鼠标样式
+            this.Cursor = Cursors.Arrow;
 
             Rect rect = new Rect(
                 Canvas.GetLeft(_selectionRectangle),
@@ -133,6 +138,8 @@ namespace Screenshot_v3_0
         {
             if (e.Key == Key.Escape)
             {
+                // 恢复默认鼠标样式
+                this.Cursor = Cursors.Arrow;
                 Cleanup();
                 DialogResult = false;
                 Close();
@@ -154,6 +161,8 @@ namespace Screenshot_v3_0
                     _isSelecting = false;
                     ReleaseMouseCapture();
                 }
+                // 恢复默认鼠标样式
+                this.Cursor = Cursors.Arrow;
                 if (_selectionRectangle != null)
                 {
                     _selectionRectangle.Visibility = Visibility.Collapsed;

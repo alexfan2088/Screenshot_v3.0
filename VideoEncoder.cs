@@ -165,7 +165,11 @@ namespace Screenshot_v3_0
                         string? errorOutput = _ffmpegProcess.StandardError.ReadToEnd();
                         if (!string.IsNullOrEmpty(errorOutput))
                         {
-                            WriteLine($"FFmpeg 输出: {errorOutput}");
+                            // 只在出现错误时输出FFmpeg输出（避免日志冗余）
+                            if (errorOutput.Contains("error") || errorOutput.Contains("Error") || errorOutput.Contains("failed"))
+                            {
+                                WriteLine($"FFmpeg 错误输出: {errorOutput}");
+                            }
                         }
                     }
                     catch { }
@@ -646,11 +650,7 @@ namespace Screenshot_v3_0
                 _ffmpegProcess = null;
             }
 
-                // 保留临时音频文件（用于调试）
-                if (!string.IsNullOrEmpty(_tempAudioPath) && File.Exists(_tempAudioPath))
-                {
-                    WriteLine($"临时音频文件保留: {_tempAudioPath}");
-                }
+                // 保留临时音频文件（用于调试，不输出日志）
             }
             catch (Exception ex)
             {
@@ -680,18 +680,7 @@ namespace Screenshot_v3_0
                 var videoFileInfo = new FileInfo(videoPath);
                 var audioFileInfo = new FileInfo(audioPath);
 
-                WriteLine($"========== 开始合并音频到视频 ==========");
-                WriteLine($"✓ 合并方式: FFmpeg 合并音频到 MP4");
-                WriteLine($"  说明: 使用 FFmpeg 将 NAudio WasapiLoopbackCapture 录制的 WAV 音频合并到视频 MP4");
-                WriteLine($"视频文件: {videoPath}");
-                WriteLine($"  大小: {videoFileInfo.Length} 字节 ({videoFileInfo.Length / 1024 / 1024:F2} MB)");
-                WriteLine($"  创建时间: {videoFileInfo.CreationTime:yyyy-MM-dd HH:mm:ss}");
-                WriteLine($"  修改时间: {videoFileInfo.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
-                WriteLine($"音频文件: {audioPath}");
-                WriteLine($"  大小: {audioFileInfo.Length} 字节 ({audioFileInfo.Length / 1024 / 1024:F2} MB)");
-                WriteLine($"  创建时间: {audioFileInfo.CreationTime:yyyy-MM-dd HH:mm:ss}");
-                WriteLine($"  修改时间: {audioFileInfo.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
-                WriteLine($"  说明: NAudio WasapiLoopbackCapture 录制（即使静音也会录制）");
+                WriteLine($"正在合并音频到视频...");
                 
                 if (audioFileInfo.Length == 0)
                 {
@@ -700,7 +689,6 @@ namespace Screenshot_v3_0
                 }
 
                 string tempOutput = Path.ChangeExtension(videoPath, ".temp.mp4");
-                WriteLine($"临时输出文件: {tempOutput}");
                 
                 // 使用 FFmpeg 合并音频
                 // 关键参数说明（确保音频正确合并，保留静音部分）：
@@ -716,10 +704,6 @@ namespace Screenshot_v3_0
                 // -fflags +genpts: 生成时间戳，确保时间戳连续
                 // -shortest: 以最短的流为准（视频或音频）
                 string arguments = $"-i \"{videoPath}\" -ss 0 -itsoffset 0 -i \"{audioPath}\" -c:v copy -c:a aac -b:a {_config.AudioBitrate}k -ac 2 -map 0:v:0 -map 1:a:0 -shortest -async 1 -avoid_negative_ts make_zero -fflags +genpts -y \"{tempOutput}\"";
-                
-                WriteLine($"FFmpeg 路径: {_ffmpegPath}");
-                WriteLine($"合并音频命令: {_ffmpegPath} {arguments}");
-                WriteLine($"开始执行 FFmpeg 合并...");
 
                 var processInfo = new ProcessStartInfo
                 {
@@ -748,7 +732,8 @@ namespace Screenshot_v3_0
                                 while ((line = process.StandardError.ReadLine()) != null)
                                 {
                                     errorOutputBuilder.AppendLine(line);
-                                    if (line.Contains("Duration:") || line.Contains("Stream") || line.Contains("Audio") || line.Contains("Video") || line.Contains("error") || line.Contains("Error"))
+                                    // 只在出现错误时输出（避免日志冗余）
+                                    if (line.Contains("error") || line.Contains("Error") || line.Contains("failed"))
                                     {
                                         WriteLine($"FFmpeg: {line}");
                                     }
@@ -787,87 +772,44 @@ namespace Screenshot_v3_0
                         }
                         else if (process.ExitCode == 0)
                         {
-                            WriteLine($"FFmpeg 进程成功退出（退出代码: 0）");
                             string errorOutput = errorOutputBuilder.ToString();
-                            string standardOutput = outputBuilder.ToString();
                             
                             if (!string.IsNullOrEmpty(errorOutput))
                             {
-                                WriteLine($"FFmpeg 完整错误输出: {errorOutput}");
-                                if (errorOutput.Contains("Stream #1") && errorOutput.Contains("Audio")) { WriteLine($"✓ 检测到音频流信息"); }
-                                else { WriteWarning($"⚠ 未在 FFmpeg 输出中检测到音频流信息"); }
+                                // 静默检查关键信息，不输出（避免日志冗余）
+                                bool hasAudioStream = errorOutput.Contains("Stream #1") && errorOutput.Contains("Audio");
+                                
+                                // 只在出现真正的错误时输出
+                                if (errorOutput.Contains("error") || errorOutput.Contains("Error") || errorOutput.Contains("failed"))
+                                {
+                                    WriteError($"FFmpeg 合并过程中出现错误: {errorOutput}");
+                                }
                             }
-                            if (!string.IsNullOrEmpty(standardOutput)) { WriteLine($"FFmpeg 完整标准输出: {standardOutput}"); }
                             
                             try
                             {
                                 if (File.Exists(tempOutput))
                                 {
-                                    var tempFileInfo = new FileInfo(tempOutput);
-                                    WriteLine($"合并后的文件大小: {tempFileInfo.Length} 字节 ({tempFileInfo.Length / 1024 / 1024:F2} MB)");
-                                    WriteLine($"合并后的文件创建时间: {tempFileInfo.CreationTime:yyyy-MM-dd HH:mm:ss}");
-                                    WriteLine($"合并后的文件修改时间: {tempFileInfo.LastWriteTime:yyyy-MM-dd HH:mm:ss}");
-                                    
-                                    // 使用 ffprobe 检查合并后的文件是否包含音频流
-                                    try
-                                    {
-                                        string ffprobePath = _ffmpegPath.Replace("ffmpeg.exe", "ffprobe.exe");
-                                        if (File.Exists(ffprobePath))
-                                        {
-                                            string probeArgs = $"-v error -select_streams a -show_entries stream=codec_name,codec_type,channels,sample_rate -of default=noprint_wrappers=1 \"{tempOutput}\"";
-                                            var probeInfo = new ProcessStartInfo
-                                            {
-                                                FileName = ffprobePath,
-                                                Arguments = probeArgs,
-                                                UseShellExecute = false,
-                                                CreateNoWindow = true,
-                                                RedirectStandardOutput = true,
-                                                RedirectStandardError = true
-                                            };
-                                            
-                                            using (var probeProcess = Process.Start(probeInfo))
-                                            {
-                                                if (probeProcess != null)
-                                                {
-                                                    string probeOutput = probeProcess.StandardOutput.ReadToEnd();
-                                                    string probeError = probeProcess.StandardError.ReadToEnd();
-                                                    probeProcess.WaitForExit(5000);
-                                                    
-                                                    WriteLine($"ffprobe 检查合并后的文件:");
-                                                    if (!string.IsNullOrEmpty(probeOutput))
-                                                    {
-                                                        WriteLine($"  音频流信息: {probeOutput.Trim()}");
-                                                        if (probeOutput.Contains("codec_name=aac") || probeOutput.Contains("codec_type=audio")) { WriteLine($"✓ 确认合并后的文件包含音频流"); }
-                                                        else { WriteWarning($"⚠ 合并后的文件可能不包含音频流"); }
-                                                    }
-                                                    if (!string.IsNullOrEmpty(probeError)) { WriteLine($"  ffprobe 错误: {probeError}"); }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    catch (Exception probeEx) { WriteWarning($"无法使用 ffprobe 检查文件: {probeEx.Message}"); }
-                                    
                                     // 备份原文件
                                     string backupPath = videoPath + ".backup";
-                                    if (File.Exists(videoPath)) { File.Copy(videoPath, backupPath, true); WriteLine($"已备份原视频文件到: {backupPath}"); }
+                                    if (File.Exists(videoPath)) 
+                                    { 
+                                        File.Copy(videoPath, backupPath, true); 
+                                    }
                                     
                                     File.Delete(videoPath);
                                     File.Move(tempOutput, videoPath);
                                     
                                     var finalFileInfo = new FileInfo(videoPath);
-                                    WriteLine($"========== 合并完成 ==========");
-                                    WriteLine($"✓ 最终文件: {videoPath}");
-                                    WriteLine($"✓ 生成方式: FFmpeg 合并音频到 MP4");
-                                    WriteLine($"  视频来源: FFmpeg gdigrab 录制");
-                                    WriteLine($"  音频来源: NAudio WasapiLoopbackCapture 录制（即使静音也会录制）");
-                                    WriteLine($"  合并工具: FFmpeg");
-                                    WriteLine($"最终文件大小: {finalFileInfo.Length} 字节 ({finalFileInfo.Length / 1024 / 1024:F2} MB)");
+                                    WriteLine($"✓ 音频合并完成，文件大小: {finalFileInfo.Length / 1024 / 1024:F2} MB");
                                 }
                                 else
                                 {
                                     WriteWarning($"合并后的文件不存在: {tempOutput}");
-                                    WriteLine($"FFmpeg 错误输出: {errorOutput}");
-                                    WriteLine($"FFmpeg 标准输出: {standardOutput}");
+                                    if (!string.IsNullOrEmpty(errorOutput))
+                                    {
+                                        WriteLine($"FFmpeg 错误输出: {errorOutput}");
+                                    }
                                 }
                             }
                             catch (Exception ex) { WriteError($"替换文件失败", ex); }

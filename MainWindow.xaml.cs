@@ -41,6 +41,7 @@ namespace Screenshot_v3_0
         private DispatcherTimer? _statusUpdateTimer;
         private string _currentOperation = "";
         private double _currentScreenChangeRate = 0.0; // 实时检测到的屏幕变化率
+        private bool _isStoppingRecording = false;
 
         public MainWindow()
         {
@@ -109,12 +110,6 @@ namespace Screenshot_v3_0
             UpdateLogMenuItems();
             UpdatePPTAndPDFMenuItems();
             
-            // 初始化区域显示菜单项
-            if (MenuShowRegionOverlay != null)
-            {
-                MenuShowRegionOverlay.IsChecked = _config.ShowRegionOverlay;
-            }
-            
             // 初始化界面上的设置输入框
             InitializeSettingsControls();
             
@@ -124,14 +119,12 @@ namespace Screenshot_v3_0
             
             UpdateConfigDisplay();
             
+            // 初始化按钮状态：只有选择按钮可用，开始和停止按钮禁用
+            InitializeButtonStates();
+            
             // 延迟初始化区域高亮和截图基准画面，直到窗口加载完成
             this.Loaded += (s, e) =>
             {
-                // 启动时，根据配置决定是否显示上次保存的区域
-                if (_config.ShowRegionOverlay && HasValidCustomRegion())
-                {
-                    UpdateRegionOverlay();
-                }
                 // 窗口加载完成后，初始化 _lastScreenshot 作为第一次检查的基准画面
                 if (_isScreenshotEnabled)
                 {
@@ -279,6 +272,7 @@ namespace Screenshot_v3_0
             try
             {
                 if (_isVideoRecording) return;
+                _isStoppingRecording = false;
 
                 var videoPath = Path.Combine(_workDir, $"video{DateTime.Now:yyMMddHHmmss}.mp4");
 
@@ -354,9 +348,8 @@ namespace Screenshot_v3_0
                 _videoEncoder.Start();
 
                 _isVideoRecording = true;
-                BtnStartVideo.IsEnabled = false;
-                BtnStopVideo.IsEnabled = true;
-                BtnSelectRegion.IsEnabled = false;
+                // 更新按钮状态
+                UpdateStartButtonState();
                 
                 // 初始化录制状态信息
                 _recordingStartTime = DateTime.Now;
@@ -400,6 +393,10 @@ namespace Screenshot_v3_0
 
                 // 先禁用按钮，防止重复点击
                 BtnStopVideo.IsEnabled = false;
+                
+                _isStoppingRecording = true;
+                _statusUpdateTimer?.Stop();
+                _statusUpdateTimer = null;
                 
                 // 立即更新状态显示
                 _currentOperation = "正在停止录制...";
@@ -456,17 +453,12 @@ namespace Screenshot_v3_0
                         {
                             var latestAudioFile = tempAudioFiles.OrderByDescending(f => File.GetCreationTime(f)).First();
                             var audioFileInfo = new FileInfo(latestAudioFile);
-                            WriteLine($"找到临时音频文件: {latestAudioFile}, 大小: {audioFileInfo.Length} 字节");
                             
                             // 设置音频文件路径（VideoEncoder.Finish() 会根据 _hasAudioInVideo 决定是否使用）
                             if (audioFileInfo.Length > 0)
                             {
                                 _videoEncoder?.SetAudioFile(latestAudioFile);
                             }
-                        }
-                        else
-                        {
-                            WriteLine($"未找到临时音频文件（可能是实时合成模式，音频已通过管道写入）");
                         }
                         
                         // 现在停止视频录制并完成编码
@@ -509,10 +501,12 @@ namespace Screenshot_v3_0
                         {
                             _videoEncoder = null;
                             _isVideoRecording = false;
-                            BtnStartVideo.IsEnabled = true;
-                            BtnSelectRegion.IsEnabled = true;
+                            
+                            // 更新按钮状态（考虑区域选择情况）
+                            UpdateStartButtonState();
                             
                             // 清除当前操作，恢复正常状态显示
+                            _isStoppingRecording = false;
                             _currentOperation = "";
                             UpdateStatusDisplay("视频录制已停止");
                         });
@@ -526,11 +520,10 @@ namespace Screenshot_v3_0
                             _statusUpdateTimer?.Stop();
                             _statusUpdateTimer = null;
                             _currentOperation = "";
+                            _isStoppingRecording = false;
                             
                             UpdateStatusDisplay($"停止录制失败：{ex.Message}");
-                            BtnStartVideo.IsEnabled = true;
-                            BtnStopVideo.IsEnabled = true;
-                            BtnSelectRegion.IsEnabled = true;
+                            UpdateStartButtonState();
                         });
                     }
                 });
@@ -541,11 +534,10 @@ namespace Screenshot_v3_0
                 _statusUpdateTimer?.Stop();
                 _statusUpdateTimer = null;
                 _currentOperation = "";
+                _isStoppingRecording = false;
                 
                 UpdateStatusDisplay($"停止录制视频失败：{ex.Message}");
-                BtnStartVideo.IsEnabled = true;
-                BtnStopVideo.IsEnabled = true;
-                BtnSelectRegion.IsEnabled = true;
+                UpdateStartButtonState();
             }
         }
 
@@ -569,7 +561,7 @@ namespace Screenshot_v3_0
         /// </summary>
         private void StatusUpdateTimer_Tick(object? sender, EventArgs e)
         {
-            if (_isVideoRecording)
+            if (_isVideoRecording && !_isStoppingRecording)
             {
                 // 录制中：显示屏幕变化率、录制间隔、截图数量
                 UpdateRecordingStatus();
@@ -583,6 +575,15 @@ namespace Screenshot_v3_0
         {
             try
             {
+                if (_isStoppingRecording)
+                {
+                    if (!string.IsNullOrEmpty(_currentOperation))
+                    {
+                        UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                    }
+                    return;
+                }
+
                 // 如果截图功能未启用，显示提示信息
                 if (!_isScreenshotEnabled)
                 {
@@ -641,6 +642,12 @@ namespace Screenshot_v3_0
             {
                 if (StatusBarInfo != null)
                 {
+                    if (_isStoppingRecording && !string.IsNullOrEmpty(_currentOperation))
+                    {
+                        UpdateStatusDisplayWithScroll(_currentOperation, System.Windows.Media.Brushes.Orange);
+                        return;
+                    }
+
                     // 如果正在录制，显示录制状态
                     if (_isVideoRecording && statusText == null)
                     {
@@ -849,6 +856,70 @@ namespace Screenshot_v3_0
                    _config.RegionHeight > 0;
         }
 
+        /// <summary>
+        /// 初始化按钮状态：只有选择按钮可用，开始和停止按钮禁用
+        /// </summary>
+        private void InitializeButtonStates()
+        {
+            try
+            {
+                if (BtnStartVideo != null)
+                {
+                    BtnStartVideo.IsEnabled = false;
+                }
+                if (BtnStopVideo != null)
+                {
+                    BtnStopVideo.IsEnabled = false;
+                }
+                if (BtnSelectRegion != null)
+                {
+                    BtnSelectRegion.IsEnabled = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"初始化按钮状态失败", ex);
+            }
+        }
+
+        /// <summary>
+        /// 更新开始按钮的启用状态
+        /// 如果没有有效区域，则禁用开始按钮
+        /// </summary>
+        private void UpdateStartButtonState()
+        {
+            try
+            {
+                if (BtnStartVideo != null)
+                {
+                    // 如果没有有效区域，则禁用开始按钮
+                    if (!HasValidCustomRegion())
+                    {
+                        BtnStartVideo.IsEnabled = false;
+                    }
+                    else
+                    {
+                        // 否则启用开始按钮（除非正在录制）
+                        BtnStartVideo.IsEnabled = !_isVideoRecording;
+                    }
+                }
+                // 停止按钮始终跟随录制状态
+                if (BtnStopVideo != null)
+                {
+                    BtnStopVideo.IsEnabled = _isVideoRecording;
+                }
+                // 选择按钮：录制时禁用，否则启用
+                if (BtnSelectRegion != null)
+                {
+                    BtnSelectRegion.IsEnabled = !_isVideoRecording;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新开始按钮状态失败", ex);
+            }
+        }
+
         private void UpdateRegionOverlay()
         {
             try
@@ -947,6 +1018,9 @@ namespace Screenshot_v3_0
                         // 用户选择新区域后，总是显示红色矩形框（不受配置影响）
                         UpdateRegionOverlay();
                         UpdateConfigDisplay();
+                        
+                        // 选择区域后，更新开始按钮状态
+                        UpdateStartButtonState();
 
                         WriteLine($"选择录制区域: 左上=({rect.X},{rect.Y}), 大小={rect.Width}x{rect.Height}");
                         UpdateStatusDisplay($"已选择区域：{rect.Width}x{rect.Height} @ ({rect.X},{rect.Y})");
@@ -1326,25 +1400,6 @@ namespace Screenshot_v3_0
             }
         }
 
-        private void MenuShowRegionOverlay_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _config.ShowRegionOverlay = MenuShowRegionOverlay.IsChecked;
-                _config.Save(_configPath);
-                WriteLine($"启动时显示录制区域: {(_config.ShowRegionOverlay ? "启用" : "禁用")}");
-                UpdateStatusDisplay($"启动时显示录制区域: {(_config.ShowRegionOverlay ? "已启用" : "已禁用")}");
-                
-                // 注意：这个配置只影响启动时的行为
-                // 如果当前已经有区域且正在显示，菜单切换不会立即隐藏（因为用户可能刚选择了区域）
-                // 如果用户想隐藏，可以通过其他方式，或者下次启动时才会应用这个配置
-            }
-            catch (Exception ex)
-            {
-                WriteError($"切换显示录制区域功能失败", ex);
-                UpdateStatusDisplay($"切换显示录制区域功能失败：{ex.Message}");
-            }
-        }
 
         private void ScreenshotTimer_Tick(object? sender, EventArgs e)
         {
@@ -1401,6 +1456,15 @@ namespace Screenshot_v3_0
                     return 1000;
                 }
 
+                // 检查两张图片的尺寸是否匹配
+                if (currentScreenshot.Width != _lastScreenshot.Width || 
+                    currentScreenshot.Height != _lastScreenshot.Height)
+                {
+                    // 尺寸不匹配（可能是区域选择改变了），返回最大值表示需要更新
+                    currentScreenshot?.Dispose();
+                    return 1000;
+                }
+
                 // 比较两张图片的差异（参考Python代码的pixel_diff函数）
                 // Python逻辑：np.any(diff > 20, axis=2) - 如果任何一个颜色通道的差值超过20，认为像素变化
                 int changedPixels = 0;
@@ -1409,10 +1473,22 @@ namespace Screenshot_v3_0
                 // 但计算方式与Python保持一致：检查任何一个通道是否超过20
                 int sampleRate = 5;
                 int sampledPixels = 0;
-                for (int y = 0; y < currentScreenshot.Height; y += sampleRate)
+                
+                // 使用较小的尺寸确保不越界
+                int width = Math.Min(currentScreenshot.Width, _lastScreenshot.Width);
+                int height = Math.Min(currentScreenshot.Height, _lastScreenshot.Height);
+                
+                for (int y = 0; y < height; y += sampleRate)
                 {
-                    for (int x = 0; x < currentScreenshot.Width; x += sampleRate)
+                    for (int x = 0; x < width; x += sampleRate)
                     {
+                        // 确保坐标在有效范围内
+                        if (x >= currentScreenshot.Width || y >= currentScreenshot.Height ||
+                            x >= _lastScreenshot.Width || y >= _lastScreenshot.Height)
+                        {
+                            continue;
+                        }
+                        
                         Color currentColor = currentScreenshot.GetPixel(x, y);
                         Color lastColor = _lastScreenshot.GetPixel(x, y);
                         
@@ -1615,7 +1691,7 @@ namespace Screenshot_v3_0
                 if (_config.GeneratePPT)
                 {
                     string timestamp = DateTime.Now.ToString("yyMMddHHmmss");
-                    _pptFilePath = Path.Combine(_screenshotDir, $"Pic{timestamp}.pptx");
+                    _pptFilePath = Path.Combine(_screenshotDir, $"PPT{timestamp}.pptx");
                     _pptGenerator = new PPTGenerator(_pptFilePath, width, height);
                     _pptGenerator.Initialize();
                     WriteLine($"PPT生成器已初始化: {_pptFilePath}");
@@ -1624,7 +1700,7 @@ namespace Screenshot_v3_0
                 if (_config.GeneratePDF)
                 {
                     string timestamp = DateTime.Now.ToString("yyMMddHHmmss");
-                    _pdfFilePath = Path.Combine(_screenshotDir, $"Pic{timestamp}.pdf");
+                    _pdfFilePath = Path.Combine(_screenshotDir, $"PDF{timestamp}.pdf");
                     _pdfGenerator = new PDFGenerator(_pdfFilePath, width, height);
                     _pdfGenerator.Initialize();
                     WriteLine($"PDF生成器已初始化: {_pdfFilePath}");
