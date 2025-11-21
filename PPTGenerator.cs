@@ -27,10 +27,12 @@ namespace Screenshot_v3_0
         private uint _shapeId = 2;
 
         private readonly string _filePath;       // 最终输出的PPT路径
-        private readonly int _slideWidth;        // 页面宽度（像素）
-        private readonly int _slideHeight;       // 页面高度（像素）
+        private int _slideWidth;                 // 页面宽度（像素）- 可能根据第一张图片调整
+        private int _slideHeight;                // 页面高度（像素）- 可能根据第一张图片调整
         private readonly string _templatePath;   // 本次生成用的临时模板路径
         private bool _isInitialized = false;
+        private bool _slideSizeAdjusted = false;  // 是否已根据图片调整过PPT尺寸
+        private bool _templateDeleted = false;     // 模板是否已被删除（避免重复删除）
 
         public PPTGenerator(string filePath, int width, int height)
         {
@@ -105,7 +107,13 @@ namespace Screenshot_v3_0
                     var slideIds = presentation.SlideIdList.Elements<SlideId>().ToList();
                     foreach (var slideId in slideIds)
                     {
-                        string relId = slideId.RelationshipId;
+                        string? relId = slideId.RelationshipId;
+                        if (string.IsNullOrEmpty(relId))
+                        {
+                            // 如果 RelationshipId 为 null 或空，跳过这个 SlideId
+                            continue;
+                        }
+                        
                         var slidePart = (SlidePart)_presentationPart.GetPartById(relId);
 
                         presentation.SlideIdList.RemoveChild(slideId);
@@ -174,14 +182,43 @@ namespace Screenshot_v3_0
                 }
                 string imageRelId = slidePart.GetIdOfPart(imagePart);
 
-                // === 3. 计算图片尺寸：直接铺满整个幻灯片 ===
-                // 使用与PPT尺寸相同的计算方式，确保完全一致
-                double widthInches = Math.Max(_slideWidth / 96.0, 1.0);
-                double heightInches = Math.Max(_slideHeight / 96.0, 1.0);
-                
+                // === 3. 读取实际图片尺寸，根据第一张图片调整PPT尺寸，避免变形 ===
+                int imgWidthPx;
+                int imgHeightPx;
+                using (var img = System.Drawing.Image.FromFile(imagePath))
+                {
+                    imgWidthPx = img.Width;
+                    imgHeightPx = img.Height;
+                }
+
+                // 如果是第一张图片，根据图片实际尺寸调整PPT尺寸，确保图片完全铺满且不变形
+                if (!_slideSizeAdjusted)
+                {
+                    _slideWidth = imgWidthPx;
+                    _slideHeight = imgHeightPx;
+                    
+                    // 更新PPT的SlideSize
+                    double slideWidthInches = Math.Max(_slideWidth / 96.0, 1.0);
+                    double slideHeightInches = Math.Max(_slideHeight / 96.0, 1.0);
+                    
+                    presentation.SlideSize = new SlideSize
+                    {
+                        Cx = (int)(slideWidthInches * 914400),
+                        Cy = (int)(slideHeightInches * 914400),
+                        Type = SlideSizeValues.Custom
+                    };
+                    presentation.Save();
+                    
+                    _slideSizeAdjusted = true;
+                    WriteLine($"根据第一张图片调整PPT尺寸: {_slideWidth}x{_slideHeight} 像素");
+                }
+
                 // 图片尺寸与PPT尺寸完全一致（使用相同的EMU计算方式）
-                long picWidthEmu = (long)(widthInches * 914400);   // 1 inch = 914400 EMU
-                long picHeightEmu = (long)(heightInches * 914400);
+                double picWidthInches = Math.Max(_slideWidth / 96.0, 1.0);
+                double picHeightInches = Math.Max(_slideHeight / 96.0, 1.0);
+                
+                long picWidthEmu = (long)(picWidthInches * 914400);
+                long picHeightEmu = (long)(picHeightInches * 914400);
                 long xEmu = 0;  // 从左上角开始
                 long yEmu = 0;
 
@@ -291,18 +328,30 @@ namespace Screenshot_v3_0
 
         private void TryDeleteTemplate()
         {
+            // 如果已经删除过，直接返回，避免重复删除
+            if (_templateDeleted)
+                return;
+
             try
             {
                 if (!string.IsNullOrEmpty(_templatePath) && File.Exists(_templatePath))
                 {
                     File.Delete(_templatePath);
+                    _templateDeleted = true;  // 标记为已删除
                     WriteLine($"已删除临时PPT模板: {_templatePath}");
+                }
+                else if (!string.IsNullOrEmpty(_templatePath))
+                {
+                    // 文件不存在，也标记为已删除（可能是之前已经删除了）
+                    _templateDeleted = true;
                 }
             }
             catch (Exception ex)
             {
                 // 这里不要抛异常，只打印日志即可
                 WriteError($"删除临时PPT模板失败: {_templatePath}", ex);
+                // 即使删除失败，也标记为已删除，避免重复尝试
+                _templateDeleted = true;
             }
         }
     }

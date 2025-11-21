@@ -44,8 +44,10 @@
                 Click="BtnStartVideo_Click" x:Name="BtnStartVideo" FontSize="9" Padding="2,1" ToolTip="开始录制视频"/>
         <Button Content="停止" Width="35" Height="22" Margin="0,0,4,0"
                 Click="BtnStopVideo_Click" x:Name="BtnStopVideo" IsEnabled="False" FontSize="9" Padding="2,1" ToolTip="停止录制视频"/>
-        <Button Content="选择" Width="32" Height="22" Margin="0,0,8,0"
+        <Button Content="选择" Width="32" Height="22" Margin="0,0,4,0"
                 Click="BtnSelectRegion_Click" x:Name="BtnSelectRegion" FontSize="9" Padding="2,1" ToolTip="选择录制区域"/>
+        <Button Content="恢复" Width="32" Height="22" Margin="0,0,8,0"
+                Click="BtnRestoreRegion_Click" x:Name="BtnRestoreRegion" FontSize="9" Padding="2,1" ToolTip="恢复最近一次框选的区域"/>
         
         <!-- 屏幕变化率设置 -->
         <TextBlock Text="变化率:" VerticalAlignment="Center" FontSize="9" Margin="0,0,2,0"/>

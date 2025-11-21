@@ -86,25 +86,19 @@ namespace Screenshot_v3_0
             // SetLogDirectory 会根据模式决定是否清空日志文件
             Logger.SetLogDirectory(_workDir);
             
-            // 初始化截图定时器
+            // 初始化截图定时器（但不启动，只有点击开始按钮后才启动）
             _screenshotTimer = new DispatcherTimer();
             _screenshotTimer.Tick += ScreenshotTimer_Tick;
             _lastScreenshotTime = DateTime.Now;
             
-            // 初始化截图功能（默认开启）
+            // 初始化截图功能（默认开启，但定时器不启动）
             _isScreenshotEnabled = true;
             if (MenuScreenshot != null)
             {
                 MenuScreenshot.IsChecked = true;
             }
             
-            // 启动截图定时器（默认开启）
-            if (_screenshotTimer != null)
-            {
-                _screenshotTimer.Interval = TimeSpan.FromSeconds(1);
-                _screenshotTimer.Start();
-                _lastScreenshotTime = DateTime.Now;
-            }
+            // 注意：截图定时器不在启动时自动运行，只有点击"开始"按钮后才启动
             
             // 初始化菜单项状态
             UpdateLogMenuItems();
@@ -274,6 +268,18 @@ namespace Screenshot_v3_0
                 if (_isVideoRecording) return;
                 _isStoppingRecording = false;
 
+                // 每次开始录制时，清理之前的PPT/PDF生成器，确保生成新的文件
+                // 因为用户可能重新选择了区域，需要生成新的文件
+                if (_pptGenerator != null || _pdfGenerator != null)
+                {
+                    WriteLine("清理之前的PPT/PDF生成器，准备生成新文件");
+                    _pptGenerator?.Dispose();
+                    _pdfGenerator?.Dispose();
+                    _pptGenerator = null;
+                    _pdfGenerator = null;
+                    _pptPdfInitialized = false;
+                }
+
                 var videoPath = Path.Combine(_workDir, $"video{DateTime.Now:yyMMddHHmmss}.mp4");
 
                 int videoWidth;
@@ -360,6 +366,17 @@ namespace Screenshot_v3_0
                 _statusUpdateTimer.Interval = TimeSpan.FromMilliseconds(500); // 每500ms更新一次
                 _statusUpdateTimer.Tick += StatusUpdateTimer_Tick;
                 _statusUpdateTimer.Start();
+
+                // 启动截图定时器（只有在开始录制时才启动）
+                if (_isScreenshotEnabled && _screenshotTimer != null)
+                {
+                    _screenshotTimer.Interval = TimeSpan.FromSeconds(1);
+                    _screenshotTimer.Start();
+                    _lastScreenshotTime = DateTime.Now;
+                    // 立即初始化 _lastScreenshot，作为第一次检查的基准画面
+                    UpdateLastScreenshot();
+                    WriteLine("截图定时器已启动");
+                }
 
                 // 状态显示会在定时器中更新，显示：屏幕变化率、录制间隔、截图数量
                 // 立即更新一次状态
@@ -501,6 +518,13 @@ namespace Screenshot_v3_0
                         {
                             _videoEncoder = null;
                             _isVideoRecording = false;
+                            
+                            // 停止截图定时器
+                            if (_screenshotTimer != null && _screenshotTimer.IsEnabled)
+                            {
+                                _screenshotTimer.Stop();
+                                WriteLine("截图定时器已停止");
+                            }
                             
                             // 更新按钮状态（考虑区域选择情况）
                             UpdateStartButtonState();
@@ -931,7 +955,7 @@ namespace Screenshot_v3_0
                     return;
                 }
 
-                // 有有效区域，显示矩形框
+                // 有有效区域，显示红色矩形框
                 if (_regionHighlightWindow == null)
                 {
                     _regionHighlightWindow = new RegionHighlightWindow();
@@ -1046,6 +1070,71 @@ namespace Screenshot_v3_0
                 {
                     // 忽略关闭错误
                 }
+            }
+        }
+
+        /// <summary>
+        /// 恢复最近一次框选的区域
+        /// </summary>
+        private void BtnRestoreRegion_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_isVideoRecording)
+                {
+                    UpdateStatusDisplay("请先停止录制，再恢复录制区域");
+                    return;
+                }
+
+                // 检查配置中是否有有效的区域
+                if (!HasValidCustomRegion())
+                {
+                    UpdateStatusDisplay("没有可恢复的区域，请先选择区域");
+                    WriteLine("恢复区域失败：配置中没有有效的区域信息");
+                    return;
+                }
+
+                // 验证区域是否在主屏幕范围内
+                var (screenWidth, screenHeight) = GetPrimaryScreenPixelSize();
+                int regionRight = _config.RegionLeft + _config.RegionWidth;
+                int regionBottom = _config.RegionTop + _config.RegionHeight;
+
+                if (_config.RegionLeft < 0 || _config.RegionTop < 0 ||
+                    regionRight > screenWidth || regionBottom > screenHeight)
+                {
+                    string warningMsg = $"保存的区域部分超出主屏幕范围！\n" +
+                                       $"区域: ({_config.RegionLeft}, {_config.RegionTop}) 到 ({regionRight}, {regionBottom})\n" +
+                                       $"主屏幕: (0, 0) 到 ({screenWidth}, {screenHeight})\n" +
+                                       $"是否继续使用此区域？";
+
+                    WriteWarning(warningMsg);
+
+                    var result = MessageBox.Show(warningMsg, "区域超出范围",
+                        MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+                    if (result == MessageBoxResult.No)
+                    {
+                        UpdateStatusDisplay("已取消恢复区域");
+                        return;
+                    }
+                }
+
+                // 恢复区域：确保 UseCustomRegion 为 true
+                _config.UseCustomRegion = true;
+                _config.Save(_configPath);
+
+                // 更新界面显示
+                UpdateRegionOverlay();
+                UpdateConfigDisplay();
+                UpdateStartButtonState();
+
+                WriteLine($"恢复录制区域: 左上=({_config.RegionLeft},{_config.RegionTop}), 大小={_config.RegionWidth}x{_config.RegionHeight}");
+                UpdateStatusDisplay($"已恢复区域：{_config.RegionWidth}x{_config.RegionHeight} @ ({_config.RegionLeft},{_config.RegionTop})");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"恢复录制区域失败", ex);
+                UpdateStatusDisplay($"恢复录制区域失败：{ex.Message}");
             }
         }
 
@@ -1547,14 +1636,23 @@ namespace Screenshot_v3_0
                 // 如果设置了框选区域，只捕获框选区域；否则捕获整个屏幕
                 if (HasValidCustomRegion())
                 {
-                    int width = _config.RegionWidth;
-                    int height = _config.RegionHeight;
+                    // 向内收缩几个像素，避开红色框的边框（红色框边框宽度为2像素，收缩3像素更安全）
+                    const int borderOffset = 3;
+                    int offsetX = _config.RegionLeft + borderOffset;
+                    int offsetY = _config.RegionTop + borderOffset;
+                    int width = _config.RegionWidth - borderOffset * 2;  // 左右各收缩
+                    int height = _config.RegionHeight - borderOffset * 2; // 上下各收缩
+                    
+                    // 确保宽度和高度为正数
+                    if (width <= 0) width = 1;
+                    if (height <= 0) height = 1;
+                    
                     Bitmap bitmap = new Bitmap(width, height);
                     using (Graphics graphics = Graphics.FromImage(bitmap))
                     {
                         graphics.CopyFromScreen(
-                            _config.RegionLeft, 
-                            _config.RegionTop, 
+                            offsetX, 
+                            offsetY, 
                             0, 
                             0, 
                             new System.Drawing.Size(width, height)
@@ -1591,14 +1689,23 @@ namespace Screenshot_v3_0
                 // 如果设置了框选区域，只捕获框选区域；否则捕获整个屏幕
                 if (HasValidCustomRegion())
                 {
-                    width = _config.RegionWidth;
-                    height = _config.RegionHeight;
+                    // 向内收缩几个像素，避开红色框的边框（红色框边框宽度为2像素，收缩3像素更安全）
+                    const int borderOffset = 3;
+                    int offsetX = _config.RegionLeft + borderOffset;
+                    int offsetY = _config.RegionTop + borderOffset;
+                    width = _config.RegionWidth - borderOffset * 2;  // 左右各收缩
+                    height = _config.RegionHeight - borderOffset * 2; // 上下各收缩
+                    
+                    // 确保宽度和高度为正数
+                    if (width <= 0) width = 1;
+                    if (height <= 0) height = 1;
+                    
                     bitmap = new Bitmap(width, height);
                     using (Graphics graphics = Graphics.FromImage(bitmap))
                     {
                         graphics.CopyFromScreen(
-                            _config.RegionLeft, 
-                            _config.RegionTop, 
+                            offsetX, 
+                            offsetY, 
                             0, 
                             0, 
                             new System.Drawing.Size(width, height)
