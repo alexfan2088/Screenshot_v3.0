@@ -817,8 +817,6 @@ namespace Screenshot_v3_0
                         });
                     }
                     
-                    // 检查是否需要滚动
-                    CheckAndStartScrolling();
                 }
             }
             catch (Exception ex)
@@ -896,8 +894,6 @@ namespace Screenshot_v3_0
                         Foreground = finalStatusColor
                     });
                     
-                    // 检查是否需要滚动
-                    CheckAndStartScrolling();
                 }
             }
             catch (Exception ex)
@@ -921,8 +917,6 @@ namespace Screenshot_v3_0
                         Foreground = color
                     });
                     
-                    // 检查是否需要滚动
-                    CheckAndStartScrolling();
                 }
             }
             catch (Exception ex)
@@ -946,8 +940,6 @@ namespace Screenshot_v3_0
                         Foreground = color 
                     });
                     
-                    // 检查是否需要滚动
-                    CheckAndStartScrolling();
                 }
             }
             catch (Exception ex)
@@ -956,121 +948,6 @@ namespace Screenshot_v3_0
             }
         }
 
-        /// <summary>
-        /// 检查并启动滚动动画（跑马灯效果）
-        /// </summary>
-        private void CheckAndStartScrolling()
-        {
-            try
-            {
-                if (StatusBarInfo != null && StatusBarScrollViewer != null)
-                {
-                    // 使用Dispatcher延迟检查，确保布局已完成
-                    Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        try
-                        {
-                            // 等待布局完成
-                            StatusBarInfo.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-                            double textWidth = StatusBarInfo.DesiredSize.Width;
-                            double scrollViewerWidth = StatusBarScrollViewer.ActualWidth;
-                            
-                            // 如果文本宽度超过ScrollViewer宽度，启动滚动动画
-                            if (textWidth > scrollViewerWidth && scrollViewerWidth > 0)
-                            {
-                                StartScrollingAnimation(textWidth - scrollViewerWidth);
-                            }
-                            else
-                            {
-                                StopScrollingAnimation();
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            WriteError($"延迟检查滚动状态失败", ex);
-                        }
-                    }), System.Windows.Threading.DispatcherPriority.Loaded);
-                }
-            }
-            catch (Exception ex)
-            {
-                WriteError($"检查滚动状态失败", ex);
-            }
-        }
-
-        private System.Windows.Media.Animation.Storyboard? _scrollingStoryboard;
-
-        /// <summary>
-        /// 启动滚动动画（使用Transform实现）
-        /// </summary>
-        private void StartScrollingAnimation(double scrollDistance)
-        {
-            try
-            {
-                // 如果动画已经在运行，不重复启动
-                if (_scrollingStoryboard != null && _scrollingStoryboard.GetCurrentState() == System.Windows.Media.Animation.ClockState.Active)
-                {
-                    return;
-                }
-
-                StopScrollingAnimation();
-
-                if (StatusBarInfo == null) return;
-
-                // 使用Transform实现滚动效果
-                var transform = new System.Windows.Media.TranslateTransform();
-                StatusBarInfo.RenderTransform = transform;
-
-                // 创建滚动动画
-                _scrollingStoryboard = new System.Windows.Media.Animation.Storyboard();
-                
-                var scrollAnimation = new System.Windows.Media.Animation.DoubleAnimation
-                {
-                    From = 0,
-                    To = -(scrollDistance + 50), // 向左滚动
-                    Duration = TimeSpan.FromSeconds(5), // 5秒完成一次滚动
-                    RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever,
-                    AutoReverse = true
-                };
-
-                System.Windows.Media.Animation.Storyboard.SetTarget(scrollAnimation, transform);
-                System.Windows.Media.Animation.Storyboard.SetTargetProperty(scrollAnimation, new System.Windows.PropertyPath(System.Windows.Media.TranslateTransform.XProperty));
-                
-                _scrollingStoryboard.Children.Add(scrollAnimation);
-                _scrollingStoryboard.Begin();
-            }
-            catch (Exception ex)
-            {
-                WriteError($"启动滚动动画失败", ex);
-            }
-        }
-
-        /// <summary>
-        /// 停止滚动动画
-        /// </summary>
-        private void StopScrollingAnimation()
-        {
-            try
-            {
-                if (_scrollingStoryboard != null)
-                {
-                    _scrollingStoryboard.Stop();
-                    _scrollingStoryboard = null;
-                }
-                if (StatusBarInfo != null && StatusBarInfo.RenderTransform is System.Windows.Media.TranslateTransform transform)
-                {
-                    transform.X = 0;
-                }
-                if (StatusBarScrollViewer != null)
-                {
-                    StatusBarScrollViewer.ScrollToHorizontalOffset(0);
-                }
-            }
-            catch (Exception ex)
-            {
-                WriteError($"停止滚动动画失败", ex);
-            }
-        }
 
         private bool HasValidCustomRegion()
         {

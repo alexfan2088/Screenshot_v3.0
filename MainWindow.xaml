@@ -245,15 +245,7 @@
 
       <!-- 信息显示和窗口控制按钮（右半部分） -->
       <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
-        <ScrollViewer x:Name="StatusBarScrollViewer" 
-                      HorizontalScrollBarVisibility="Auto" 
-                      VerticalScrollBarVisibility="Disabled"
-                      Width="400" 
-                      Height="20"
-                      Margin="0,0,8,0"
-                      VerticalAlignment="Center">
-          <TextBlock x:Name="StatusBarInfo" FontSize="12" TextWrapping="NoWrap" VerticalAlignment="Center" Foreground="#D8F3DC"/>
-        </ScrollViewer>
+        <TextBlock x:Name="StatusBarInfo" FontSize="12" TextWrapping="NoWrap" VerticalAlignment="Center" Foreground="#D8F3DC" Width="400" Height="20" Margin="0,0,8,0"/>
         <!-- 窗口控制按钮 -->
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
           <Button Content="—" Width="22" Height="22" Margin="0,0,3,0" 
