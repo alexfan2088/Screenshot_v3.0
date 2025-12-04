@@ -11,6 +11,17 @@ using static Screenshot_v3_0.Logger;
 
 namespace Screenshot_v3_0
 {
+    /// <summary>
+    /// 输出模式枚举
+    /// </summary>
+    public enum OutputMode
+    {
+        None,           // 不生成音视频（只生成PPT/PDF和截图）
+        AudioOnly,      // 只生成音频
+        VideoOnly,      // 只生成视频
+        AudioAndVideo   // 音频+视频
+    }
+
     public partial class MainWindow : Window
     {
         private readonly AudioRecorder _audioRecorder = new();
@@ -25,7 +36,7 @@ namespace Screenshot_v3_0
         private DispatcherTimer? _screenshotTimer;
         private Bitmap? _lastScreenshot;
         private DateTime _lastScreenshotTime;
-        private bool _isScreenshotEnabled;
+        private bool _keepJpgFiles; // 是否保留JPG文件（截图功能始终启用，用于生成PPT）
         private readonly string _screenshotDir;
         
         // PPT和PDF生成器
@@ -37,6 +48,10 @@ namespace Screenshot_v3_0
         
         // 当前录制的文件路径
         private string? _currentVideoPath;
+        private string? _currentAudioPath; // 当前音频文件路径
+        
+        // 输出模式（默认音频+视频）
+        private OutputMode _outputMode = OutputMode.AudioAndVideo;
         
         // 录制状态信息
         private DateTime _recordingStartTime;
@@ -89,6 +104,9 @@ namespace Screenshot_v3_0
             // 加载配置
             _config = RecordingConfig.Load(_configPath);
             
+            // 强制启用PPT生成（必选项）
+            _config.GeneratePPT = true;
+            
             // 初始化日志系统
             Logger.Enabled = _config.LogEnabled == 1;
             Logger.SetLogFileMode(_config.LogFileMode);
@@ -101,11 +119,12 @@ namespace Screenshot_v3_0
             _screenshotTimer.Tick += ScreenshotTimer_Tick;
             _lastScreenshotTime = DateTime.Now;
             
-            // 初始化截图功能（默认开启，但定时器不启动）
-            _isScreenshotEnabled = true;
+            // 初始化截图功能（截图始终启用，用于生成PPT）
+            // _keepJpgFiles 控制是否保留JPG文件（从配置加载）
+            _keepJpgFiles = _config.KeepJpgFiles;
             if (MenuScreenshot != null)
             {
-                MenuScreenshot.IsChecked = true;
+                MenuScreenshot.IsChecked = _keepJpgFiles;
             }
             
             // 注意：截图定时器不在启动时自动运行，只有点击"开始"按钮后才启动
@@ -113,6 +132,7 @@ namespace Screenshot_v3_0
             // 初始化菜单项状态
             UpdateLogMenuItems();
             UpdatePPTAndPDFMenuItems();
+            UpdateOutputModeMenuItems();
             
             // 初始化界面上的设置输入框
             InitializeSettingsControls();
@@ -130,10 +150,8 @@ namespace Screenshot_v3_0
             this.Loaded += (s, e) =>
             {
                 // 窗口加载完成后，初始化 _lastScreenshot 作为第一次检查的基准画面
-                if (_isScreenshotEnabled)
-                {
-                    UpdateLastScreenshot();
-                }
+                // 截图功能始终启用（用于生成PPT）
+                UpdateLastScreenshot();
                 // 动态计算信息显示区域的宽度
                 UpdateStatusBarInfoWidth();
             };
@@ -263,6 +281,8 @@ namespace Screenshot_v3_0
                 if (settingsWindow.ShowDialog() == true)
                 {
                     _config = settingsWindow.Config;
+                    // 强制启用PPT生成（必选项）
+                    _config.GeneratePPT = true;
                     _config.Save(_configPath);
                     UpdateConfigDisplay();
                     UpdateLogMenuItems();
@@ -301,104 +321,151 @@ namespace Screenshot_v3_0
                     _pptPdfInitialized = false;
                 }
 
-                var videoPath = Path.Combine(_workDir, $"video{DateTime.Now:yyMMddHHmmss}.mp4");
-                _currentVideoPath = videoPath; // 保存当前视频文件路径
+                var timestamp = DateTime.Now.ToString("yyMMddHHmmss");
+                WriteLine($"========== 开始录制 ==========");
+                WriteLine($"输出模式: {_outputMode}");
 
-                int videoWidth;
-                int videoHeight;
-                int offsetX = 0;
-                int offsetY = 0;
-
-                var (screenWidthPixels, screenHeightPixels) = GetPrimaryScreenPixelSize();
-
-                // 应用分辨率比例：无论是否有自定义区域，都根据分辨率比例缩放视频尺寸
-                double resolutionScale = _config.VideoResolutionScale / 100.0;
-                
-                if (HasValidCustomRegion())
+                // 根据输出模式决定是否创建视频和音频
+                if (_outputMode == OutputMode.None)
                 {
-                    int regionRight = _config.RegionLeft + _config.RegionWidth;
-                    int regionBottom = _config.RegionTop + _config.RegionHeight;
+                    // 不生成音视频模式：只启动截图功能
+                    _currentVideoPath = null;
+                    _videoEncoder = null;
+                    _currentAudioPath = null;
+                    WriteLine("不生成音视频模式：只进行截图和生成PPT/PDF");
+                }
+                else if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
+                {
+                    var videoPath = Path.Combine(_workDir, $"video{timestamp}.mp4");
+                    _currentVideoPath = videoPath; // 保存当前视频文件路径
+
+                    int videoWidth;
+                    int videoHeight;
+                    int offsetX = 0;
+                    int offsetY = 0;
+
+                    var (screenWidthPixels, screenHeightPixels) = GetPrimaryScreenPixelSize();
+
+                    // 应用分辨率比例：无论是否有自定义区域，都根据分辨率比例缩放视频尺寸
+                    double resolutionScale = _config.VideoResolutionScale / 100.0;
                     
-                    if (_config.RegionLeft < 0 || _config.RegionTop < 0 ||
-                        regionRight > screenWidthPixels || regionBottom > screenHeightPixels)
+                    if (HasValidCustomRegion())
                     {
-                        string errorMsg = $"选择的录制区域超出主屏幕范围！\n" +
-                                         $"区域: ({_config.RegionLeft}, {_config.RegionTop}) 到 ({regionRight}, {regionBottom})\n" +
-                                         $"主屏幕: (0, 0) 到 ({screenWidthPixels}, {screenHeightPixels})\n" +
-                                         $"请重新选择区域或清除区域设置使用全屏录制。";
+                        int regionRight = _config.RegionLeft + _config.RegionWidth;
+                        int regionBottom = _config.RegionTop + _config.RegionHeight;
                         
-                        WriteError(errorMsg);
-                        UpdateStatusDisplay("录制区域超出屏幕范围，请重新选择");
+                        if (_config.RegionLeft < 0 || _config.RegionTop < 0 ||
+                            regionRight > screenWidthPixels || regionBottom > screenHeightPixels)
+                        {
+                            string errorMsg = $"选择的录制区域超出主屏幕范围！\n" +
+                                             $"区域: ({_config.RegionLeft}, {_config.RegionTop}) 到 ({regionRight}, {regionBottom})\n" +
+                                             $"主屏幕: (0, 0) 到 ({screenWidthPixels}, {screenHeightPixels})\n" +
+                                             $"请重新选择区域或清除区域设置使用全屏录制。";
+                            
+                            WriteError(errorMsg);
+                            UpdateStatusDisplay("录制区域超出屏幕范围，请重新选择");
+                            
+                            MessageBox.Show(errorMsg, "区域超出范围", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return;
+                        }
                         
-                        MessageBox.Show(errorMsg, "区域超出范围", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
+                        // 使用自定义区域，但应用分辨率比例缩放
+                        int originalWidth = _config.RegionWidth;
+                        int originalHeight = _config.RegionHeight;
+                        videoWidth = (int)(originalWidth * resolutionScale);
+                        videoHeight = (int)(originalHeight * resolutionScale);
+                        offsetX = _config.RegionLeft;
+                        offsetY = _config.RegionTop;
+                        WriteLine($"使用自定义区域录制: 原始尺寸 {originalWidth}x{originalHeight}, 缩放后 {videoWidth}x{videoHeight} ({_config.VideoResolutionScale}%) @ 起点 ({offsetX}, {offsetY})");
+                    }
+                    else
+                    {
+                        // 全屏录制，应用分辨率比例
+                        videoWidth = (int)(screenWidthPixels * resolutionScale);
+                        videoHeight = (int)(screenHeightPixels * resolutionScale);
+                        WriteLine($"全屏录制: 原始尺寸 {screenWidthPixels}x{screenHeightPixels}, 缩放后 {videoWidth}x{videoHeight} ({_config.VideoResolutionScale}%)");
+                    }
+
+                    // 创建视频编码器（不再需要 VideoRecorder，FFmpeg 直接录制）
+                    _videoEncoder = new VideoEncoder(videoPath, _config);
+
+                    // 计算原始捕获尺寸（不应用分辨率比例）
+                    int captureWidth = videoWidth;
+                    int captureHeight = videoHeight;
+                    if (HasValidCustomRegion())
+                    {
+                        // 如果有自定义区域，捕获时使用原始区域尺寸
+                        captureWidth = _config.RegionWidth;
+                        captureHeight = _config.RegionHeight;
+                    }
+                    else
+                    {
+                        // 全屏录制，捕获时使用全屏尺寸
+                        captureWidth = screenWidthPixels;
+                        captureHeight = screenHeightPixels;
+                    }
+
+                    // 初始化编码器（支持自定义区域偏移和分辨率缩放）
+                    // videoWidth/videoHeight 是输出尺寸（应用分辨率比例后）
+                    // captureWidth/captureHeight 是捕获尺寸（原始尺寸，不缩放）
+                    _videoEncoder.Initialize(videoWidth, videoHeight, _config.VideoFrameRate, 
+                        _config.AudioSampleRate, 2, offsetX, offsetY, captureWidth, captureHeight);
+
+                    WriteLine("MP4文件");
+                }
+                else
+                {
+                    _currentVideoPath = null;
+                    _videoEncoder = null;
+                }
+
+                // 根据输出模式决定是否开始音频录制
+                if (_outputMode == OutputMode.None)
+                {
+                    // 不生成音视频模式，跳过音频录制
+                    _currentAudioPath = null;
+                }
+                else if (_outputMode == OutputMode.AudioOnly || _outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly)
+                {
+                    // 开始音频录制（使用 NAudio WasapiLoopbackCapture，无需虚拟声卡）
+                    // 注意：无论是否有声音输出，都要录制音频（包括静音）
+                    // AudioRecorder.Start() 会创建与目标同名的临时 wav 文件
+                    // VideoOnly 模式也需要录制音频，以确保生成的视频包含声音
+                    var audioOutputPath = Path.Combine(_workDir, $"audio_{timestamp}.m4a"); // 最终输出路径（不会被使用）
+                    var expectedAudioPath = Path.Combine(_workDir, $"audio_{timestamp}.wav"); // AudioRecorder 实际创建的文件
+                    _currentAudioPath = expectedAudioPath; // 保存音频文件路径
+                    
+                    WriteLine("开始音频录制（NAudio WasapiLoopbackCapture，即使静音也会录制）");
+                    WriteLine("预期WAV文件");
+                    
+                    // 连接音频数据事件，实现边录边合成（仅在音频+视频模式下）
+                    if (_outputMode == OutputMode.AudioAndVideo)
+                    {
+                        _audioRecorder.AudioSampleAvailable += OnAudioSampleAvailable;
                     }
                     
-                    // 使用自定义区域，但应用分辨率比例缩放
-                    int originalWidth = _config.RegionWidth;
-                    int originalHeight = _config.RegionHeight;
-                    videoWidth = (int)(originalWidth * resolutionScale);
-                    videoHeight = (int)(originalHeight * resolutionScale);
-                    offsetX = _config.RegionLeft;
-                    offsetY = _config.RegionTop;
-                    WriteLine($"使用自定义区域录制: 原始尺寸 {originalWidth}x{originalHeight}, 缩放后 {videoWidth}x{videoHeight} ({_config.VideoResolutionScale}%) @ 起点 ({offsetX}, {offsetY})");
+                    _audioRecorder.Start(audioOutputPath);
+                    
+                    // 等待音频录制启动
+                    System.Threading.Thread.Sleep(300);
                 }
                 else
                 {
-                    // 全屏录制，应用分辨率比例
-                    videoWidth = (int)(screenWidthPixels * resolutionScale);
-                    videoHeight = (int)(screenHeightPixels * resolutionScale);
-                    WriteLine($"全屏录制: 原始尺寸 {screenWidthPixels}x{screenHeightPixels}, 缩放后 {videoWidth}x{videoHeight} ({_config.VideoResolutionScale}%)");
+                    _currentAudioPath = null;
                 }
-
-                // 创建视频编码器（不再需要 VideoRecorder，FFmpeg 直接录制）
-                _videoEncoder = new VideoEncoder(videoPath, _config);
-
-                // 计算原始捕获尺寸（不应用分辨率比例）
-                int captureWidth = videoWidth;
-                int captureHeight = videoHeight;
-                if (HasValidCustomRegion())
+                
+                // 启动 FFmpeg 录制视频（仅在需要视频时）
+                if (_outputMode == OutputMode.None)
                 {
-                    // 如果有自定义区域，捕获时使用原始区域尺寸
-                    captureWidth = _config.RegionWidth;
-                    captureHeight = _config.RegionHeight;
+                    // 不生成音视频模式，跳过视频录制
+                    WriteLine("不生成音视频模式：跳过视频录制");
                 }
-                else
+                else if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                 {
-                    // 全屏录制，捕获时使用全屏尺寸
-                    captureWidth = screenWidthPixels;
-                    captureHeight = screenHeightPixels;
+                    // VideoEncoder.Start() 会尝试直接录制有声视频，如果失败则使用音频管道实时合成
+                    WriteLine($"启动 FFmpeg 录制视频...");
+                    _videoEncoder?.Start();
                 }
-
-                // 初始化编码器（支持自定义区域偏移和分辨率缩放）
-                // videoWidth/videoHeight 是输出尺寸（应用分辨率比例后）
-                // captureWidth/captureHeight 是捕获尺寸（原始尺寸，不缩放）
-                _videoEncoder.Initialize(videoWidth, videoHeight, _config.VideoFrameRate, 
-                    _config.AudioSampleRate, 2, offsetX, offsetY, captureWidth, captureHeight);
-
-                // 开始音频录制（使用 NAudio WasapiLoopbackCapture，无需虚拟声卡）
-                // 注意：无论是否有声音输出，都要录制音频（包括静音）
-                // AudioRecorder.Start() 会创建与目标同名的临时 wav 文件
-                var timestamp = DateTime.Now.ToString("yyMMddHHmmss");
-                var audioOutputPath = Path.Combine(_workDir, $"audio_{timestamp}.m4a"); // 最终输出路径（不会被使用）
-                var expectedAudioPath = Path.Combine(_workDir, $"audio_{timestamp}.wav"); // AudioRecorder 实际创建的文件
-                WriteLine($"========== 开始录制 ==========");
-                WriteLine($"视频文件: {videoPath}");
-                WriteLine($"开始音频录制（NAudio WasapiLoopbackCapture，即使静音也会录制），输出路径: {audioOutputPath}");
-                WriteLine($"预期音频文件: {expectedAudioPath}");
-                
-                // 连接音频数据事件，实现边录边合成
-                _audioRecorder.AudioSampleAvailable += OnAudioSampleAvailable;
-                
-                _audioRecorder.Start(audioOutputPath);
-                
-                // 等待音频录制启动
-                System.Threading.Thread.Sleep(300);
-                
-                // 启动 FFmpeg 录制视频
-                // VideoEncoder.Start() 会尝试直接录制有声视频，如果失败则使用音频管道实时合成
-                WriteLine($"启动 FFmpeg 录制视频...");
-                _videoEncoder.Start();
 
                 _isVideoRecording = true;
                 // 更新按钮状态
@@ -424,8 +491,8 @@ namespace Screenshot_v3_0
                     WriteLine($"录制时长限制: {_recordingDurationMinutes}分钟");
                 }
 
-                // 启动截图定时器（只有在开始录制时才启动）
-                if (_isScreenshotEnabled && _screenshotTimer != null)
+                // 启动截图定时器（截图功能始终启用，用于生成PPT）
+                if (_screenshotTimer != null)
                 {
                     _screenshotTimer.Interval = TimeSpan.FromSeconds(1);
                     _screenshotTimer.Start();
@@ -439,18 +506,15 @@ namespace Screenshot_v3_0
                 // 立即更新一次状态
                 UpdateRecordingStatus();
                 
-                // 如果截图功能开启，立即截图一张
-                if (_isScreenshotEnabled)
+                // 立即截图一张（截图功能始终启用）
+                try
                 {
-                    try
-                    {
-                        CaptureScreenshot();
-                        WriteLine("开始录制时立即截图一张");
-                    }
-                    catch (Exception ex)
-                    {
-                        WriteError($"开始录制时截图失败", ex);
-                    }
+                    CaptureScreenshot();
+                    WriteLine("开始录制时立即截图一张");
+                }
+                catch (Exception ex)
+                {
+                    WriteError($"开始录制时截图失败", ex);
                 }
             }
             catch (Exception ex)
@@ -485,95 +549,134 @@ namespace Screenshot_v3_0
                 {
                     try
                     {
-                        // 同时停止视频和音频录制，确保时长一致
                         WriteLine($"========== 停止录制 ==========");
-                        WriteLine($"同时停止视频和音频录制...");
+                        WriteLine($"输出模式: {_outputMode}");
                         
-                        // 先发送停止信号给 FFmpeg（不等待完成）
-                        _videoEncoder?.RequestStop();
+                        List<string> generatedFiles = new List<string>();
                         
-                        // 断开音频事件连接（避免继续写入数据）
-                        _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
-                        
-                        // 立即停止音频录制（与视频同时停止）
-                        WriteLine($"停止音频录制");
-                        _audioRecorder.Stop();
-                        
-                        // 更新状态：正在生成MP4文件
-                        string videoFileName = _currentVideoPath != null ? Path.GetFileName(_currentVideoPath) : "video*.mp4";
-                        Dispatcher.Invoke(() =>
+                        // 根据输出模式处理视频和音频
+                        if (_outputMode == OutputMode.None)
                         {
-                            _currentOperation = $"正在生成{videoFileName}文件";
-                            UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
-                        });
-                        
-                        // 等待音频管道数据刷新（实时合成模式）或音频文件写入完成（文件合并模式）
-                        System.Threading.Thread.Sleep(1000);
-                        
-                        // 检查是否是实时合成模式（_hasAudioInVideo = true 且没有找到音频设备）
-                        // 如果是实时合成模式，不需要查找和合并音频文件
-                        // 如果是文件合并模式，需要查找音频文件并合并
-                        
-                        // 注意：VideoEncoder.Finish() 会根据 _hasAudioInVideo 判断是否需要合并
-                        // 如果是实时合成模式，_hasAudioInVideo = true，Finish() 会跳过合并
-                        // 如果是文件合并模式，_hasAudioInVideo = false，Finish() 会查找 _tempAudioPath 并合并
-                        
-                        // 只有在文件合并模式下，才需要查找和设置音频文件路径
-                        // 实时合成模式下，音频已经通过管道写入 FFmpeg，无需合并
-                        
-                        // 尝试查找临时音频文件（仅在文件合并模式下需要）
-                        var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
-                        if (tempAudioFiles.Length == 0)
-                        {
-                            tempAudioFiles = Directory.GetFiles(_workDir, "temp_audio_*.wav");
+                            // 不生成音视频模式：只处理PPT/PDF和截图
+                            WriteLine("不生成音视频模式：跳过音视频处理");
                         }
-                        
-                        if (tempAudioFiles.Length > 0)
+                        else if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                         {
-                            var latestAudioFile = tempAudioFiles.OrderByDescending(f => File.GetCreationTime(f)).First();
-                            var audioFileInfo = new FileInfo(latestAudioFile);
+                            // 先发送停止信号给 FFmpeg（不等待完成）
+                            _videoEncoder?.RequestStop();
                             
-                            // 设置音频文件路径（VideoEncoder.Finish() 会根据 _hasAudioInVideo 决定是否使用）
-                            if (audioFileInfo.Length > 0)
+                            // 更新状态：正在生成MP4文件
+                            Dispatcher.Invoke(() =>
                             {
-                                _videoEncoder?.SetAudioFile(latestAudioFile);
+                                _currentOperation = "正在生成MP4文件";
+                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                            });
+                            
+                            // VideoOnly 和 AudioAndVideo 模式都需要处理音频
+                            if (_outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly)
+                            {
+                                // 断开音频事件连接（避免继续写入数据，仅在 AudioAndVideo 模式下可能已连接）
+                                if (_outputMode == OutputMode.AudioAndVideo)
+                                {
+                                    _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
+                                }
+                                
+                                // 立即停止音频录制（与视频同时停止）
+                                WriteLine($"停止音频录制");
+                                _audioRecorder.Stop();
+                                
+                                // 等待音频管道数据刷新（实时合成模式）或音频文件写入完成（文件合并模式）
+                                System.Threading.Thread.Sleep(1000);
+                                
+                                // 检查是否是实时合成模式（_hasAudioInVideo = true 且没有找到音频设备）
+                                // 如果是实时合成模式，不需要查找和合并音频文件
+                                // 如果是文件合并模式，需要查找音频文件并合并
+                                
+                                // 注意：VideoEncoder.Finish() 会根据 _hasAudioInVideo 判断是否需要合并
+                                // 如果是实时合成模式，_hasAudioInVideo = true，Finish() 会跳过合并
+                                // 如果是文件合并模式，_hasAudioInVideo = false，Finish() 会查找 _tempAudioPath 并合并
+                                
+                                // 只有在文件合并模式下，才需要查找和设置音频文件路径
+                                // 实时合成模式下，音频已经通过管道写入 FFmpeg，无需合并
+                                
+                                // 尝试查找临时音频文件（仅在文件合并模式下需要）
+                                var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
+                                if (tempAudioFiles.Length == 0)
+                                {
+                                    tempAudioFiles = Directory.GetFiles(_workDir, "temp_audio_*.wav");
+                                }
+                                
+                                if (tempAudioFiles.Length > 0)
+                                {
+                                    var latestAudioFile = tempAudioFiles.OrderByDescending(f => File.GetCreationTime(f)).First();
+                                    var audioFileInfo = new FileInfo(latestAudioFile);
+                                    
+                                    // 设置音频文件路径（VideoEncoder.Finish() 会根据 _hasAudioInVideo 决定是否使用）
+                                    if (audioFileInfo.Length > 0)
+                                    {
+                                        _videoEncoder?.SetAudioFile(latestAudioFile);
+                                    }
+                                }
+                            }
+                            
+                            // 现在停止视频录制并完成编码
+                            // 注意：如果是实时合成模式，Finish() 会跳过合并；如果是文件合并模式，Finish() 会合并音频
+                            WriteLine($"准备停止视频录制（FFmpeg）并完成编码");
+                            _videoEncoder?.Finish(); // 这会发送 'q' 给 FFmpeg，等待退出，然后根据模式决定是否合并音频
+                            WriteLine($"视频编码完成");
+
+                            // 释放资源
+                            _videoEncoder?.Dispose();
+
+                            // 收集视频文件类型
+                            if (_currentVideoPath != null && File.Exists(_currentVideoPath))
+                            {
+                                generatedFiles.Add("MP4文件");
                             }
                         }
-                        
-                        // 现在停止视频录制并完成编码
-                        // 注意：如果是实时合成模式，Finish() 会跳过合并；如果是文件合并模式，Finish() 会合并音频
-                        WriteLine($"准备停止视频录制（FFmpeg）并完成编码");
-                        _videoEncoder?.Finish(); // 这会发送 'q' 给 FFmpeg，等待退出，然后根据模式决定是否合并音频
-                        WriteLine($"视频编码完成");
-
-                        // 释放资源
-                        _videoEncoder?.Dispose();
+                        else if (_outputMode == OutputMode.AudioOnly)
+                        {
+                            // 只生成音频模式
+                            WriteLine($"停止音频录制");
+                            _audioRecorder.Stop();
+                            
+                            // 等待音频文件写入完成
+                            System.Threading.Thread.Sleep(1000);
+                            
+                            // 查找生成的音频文件（可能是 wav 或 m4a）
+                            if (_currentAudioPath != null && File.Exists(_currentAudioPath))
+                            {
+                                string ext = Path.GetExtension(_currentAudioPath).ToLower();
+                                generatedFiles.Add(ext == ".wav" ? "WAV文件" : "MP3文件");
+                            }
+                            else
+                            {
+                                // 尝试查找最新的音频文件
+                                var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
+                                if (tempAudioFiles.Length > 0)
+                                {
+                                    generatedFiles.Add("WAV文件");
+                                }
+                            }
+                        }
 
                         // 完成PPT和PDF生成（在MP4生成完成后立即执行）
-                        List<string> generatedFiles = new List<string>();
-                        if (File.Exists(_currentVideoPath))
-                        {
-                            generatedFiles.Add(Path.GetFileName(_currentVideoPath));
-                        }
-                        
                         if (_config.GeneratePPT || _config.GeneratePDF)
                         {
                             if (_config.GeneratePPT && _pptFilePath != null)
                             {
-                                string pptFileName = Path.GetFileName(_pptFilePath);
                                 Dispatcher.Invoke(() =>
                                 {
-                                    _currentOperation = $"正在生成{pptFileName}文件";
+                                    _currentOperation = "正在生成PPT文件";
                                     UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                                 });
                             }
                             
                             if (_config.GeneratePDF && _pdfFilePath != null)
                             {
-                                string pdfFileName = Path.GetFileName(_pdfFilePath);
                                 Dispatcher.Invoke(() =>
                                 {
-                                    _currentOperation = $"正在生成{pdfFileName}文件";
+                                    _currentOperation = "正在生成PDF文件";
                                     UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                                 });
                             }
@@ -583,14 +686,19 @@ namespace Screenshot_v3_0
                         FinalizePPTAndPDF();
                         WriteLine($"PPT和PDF生成完成");
                         
-                        // 收集所有生成的文件名
+                        // 收集所有生成的文件类型
                         if (_config.GeneratePPT && _pptFilePath != null && File.Exists(_pptFilePath))
                         {
-                            generatedFiles.Add(Path.GetFileName(_pptFilePath));
+                            generatedFiles.Add("PPT文件");
                         }
                         if (_config.GeneratePDF && _pdfFilePath != null && File.Exists(_pdfFilePath))
                         {
-                            generatedFiles.Add(Path.GetFileName(_pdfFilePath));
+                            generatedFiles.Add("PDF文件");
+                        }
+                        // 如果选择了保留JPG文件，且有截图，则添加JPG文件到列表
+                        if (_keepJpgFiles && _screenshotCount > 0)
+                        {
+                            generatedFiles.Add("JPG文件");
                         }
 
                         // 在 UI 线程更新界面
@@ -613,18 +721,20 @@ namespace Screenshot_v3_0
                             _isStoppingRecording = false;
                             _currentOperation = "";
                             
-                            // 显示成功消息（只显示成功消息，不显示配置信息）
+                            // 显示成功消息，显示具体的文件名
                             if (generatedFiles.Count > 0)
                             {
-                                UpdateStatusDisplayOnly("恭喜，所有文件正确生成", new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 235))); // 天蓝色
+                                string fileList = string.Join("、", generatedFiles);
+                                UpdateStatusDisplayOnly($"已生成文件：{fileList}", new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 235))); // 天蓝色
                             }
                             else
                             {
-                                UpdateStatusDisplay("视频录制已停止");
+                                UpdateStatusDisplay("录制已停止");
                             }
                             
-                            // 清除当前视频路径
+                            // 清除当前视频和音频路径
                             _currentVideoPath = null;
+                            _currentAudioPath = null;
                         });
                     }
                     catch (Exception ex)
@@ -810,15 +920,6 @@ namespace Screenshot_v3_0
                     timeInfo = $" | 已录制: {elapsedMinutes}分{elapsedSeconds}秒";
                 }
 
-                // 如果截图功能未启用，显示提示信息
-                if (!_isScreenshotEnabled)
-                {
-                    string statusText = $"屏幕变化率: -- | " +
-                                       $"截图数量: {_screenshotCount} (请启用截图功能){timeInfo}";
-                    UpdateStatusDisplayWithScroll(statusText, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
-                    return;
-                }
-                
                 // 计算距离下次检查的剩余时间
                 TimeSpan elapsed = now - _lastScreenshotTime;
                 int remainingCheckSeconds = Math.Max(0, _config.ScreenshotInterval - (int)elapsed.TotalSeconds);
@@ -904,14 +1005,18 @@ namespace Screenshot_v3_0
                         return;
                     }
 
-                    // 状态信息（绿色表示正常，橙色表示警告，红色表示错误）
+                    // 状态信息（黄色表示就绪，绿色表示正常，橙色表示警告，红色表示错误）
                     string status = statusText ?? "就绪";
                     System.Windows.Media.Brush finalStatusColor = statusColor ?? System.Windows.Media.Brushes.Green;
                     
                     // 如果没有指定颜色，根据状态文本判断颜色
                     if (statusColor == null)
                     {
-                        if (status.Contains("失败") || status.Contains("错误"))
+                        if (status == "就绪")
+                        {
+                            finalStatusColor = System.Windows.Media.Brushes.Yellow; // 黄色
+                        }
+                        else if (status.Contains("失败") || status.Contains("错误"))
                         {
                             finalStatusColor = System.Windows.Media.Brushes.Red;
                         }
@@ -1442,18 +1547,20 @@ namespace Screenshot_v3_0
         {
             try
             {
-                // 如果截图功能未开启，禁用PPT和PDF菜单项
-                bool isEnabled = _isScreenshotEnabled;
+                // 截图功能始终启用（用于生成PPT），所以PPT和PDF菜单项始终可用
                 
                 if (MenuGeneratePPT != null)
                 {
-                    MenuGeneratePPT.IsChecked = _config.GeneratePPT;
-                    MenuGeneratePPT.IsEnabled = isEnabled;
+                    // PPT为必选项，始终选中且禁用（用户不可取消）
+                    MenuGeneratePPT.IsChecked = true;
+                    MenuGeneratePPT.IsEnabled = false; // 禁用，用户无法取消选择
+                    // 确保配置中PPT始终启用
+                    _config.GeneratePPT = true;
                 }
                 if (MenuGeneratePDF != null)
                 {
                     MenuGeneratePDF.IsChecked = _config.GeneratePDF;
-                    MenuGeneratePDF.IsEnabled = isEnabled;
+                    MenuGeneratePDF.IsEnabled = true; // 截图功能始终启用，所以PDF菜单项始终可用
                 }
             }
             catch (Exception ex)
@@ -1554,55 +1661,26 @@ namespace Screenshot_v3_0
         {
             try
             {
-                _isScreenshotEnabled = MenuScreenshot.IsChecked;
+                // "截图"菜单项只控制是否保留JPG文件，截图功能始终启用（用于生成PPT）
+                _keepJpgFiles = MenuScreenshot.IsChecked;
+                _config.KeepJpgFiles = _keepJpgFiles;
+                _config.Save(_configPath);
                 
-                if (_isScreenshotEnabled)
+                if (_keepJpgFiles)
                 {
-                    // 启动截图定时器
-                    if (_screenshotTimer != null)
-                    {
-                        // 设置定时器间隔为1秒，但实际检查逻辑会按照配置的间隔执行
-                        _screenshotTimer.Interval = TimeSpan.FromSeconds(1);
-                        _screenshotTimer.Start();
-                        _lastScreenshotTime = DateTime.Now;
-                        // 立即初始化 _lastScreenshot，作为第一次检查的基准画面
-                        UpdateLastScreenshot();
-                        
-                        // 重置PPT/PDF初始化状态，准备创建新的PPT/PDF文件
-                        _pptPdfInitialized = false;
-                        _pptGenerator?.Dispose();
-                        _pdfGenerator?.Dispose();
-                        _pptGenerator = null;
-                        _pdfGenerator = null;
-                        
-                        WriteLine("截图功能已启用");
-                        UpdateStatusDisplay("截图功能已启用");
-                    }
+                    WriteLine("保留JPG文件：已启用");
+                    UpdateStatusDisplay("保留JPG文件：已启用");
                 }
                 else
                 {
-                    // 停止截图定时器
-                    if (_screenshotTimer != null)
-                    {
-                        _screenshotTimer.Stop();
-                    }
-                    _lastScreenshot?.Dispose();
-                    _lastScreenshot = null;
-                    
-                    // 完成并释放PPT/PDF生成器
-                    FinalizePPTAndPDF();
-                    
-                    WriteLine("截图功能已禁用");
-                    UpdateStatusDisplay("截图功能已禁用");
+                    WriteLine("保留JPG文件：已禁用（JPG文件将在添加到PPT/PDF后删除）");
+                    UpdateStatusDisplay("保留JPG文件：已禁用");
                 }
-                
-                // 更新PPT和PDF菜单项的启用状态
-                UpdatePPTAndPDFMenuItems();
             }
             catch (Exception ex)
             {
-                WriteError($"切换截图功能失败", ex);
-                UpdateStatusDisplay($"切换截图功能失败：{ex.Message}");
+                WriteError($"切换保留JPG文件设置失败", ex);
+                UpdateStatusDisplay($"切换保留JPG文件设置失败：{ex.Message}");
             }
         }
 
@@ -1610,15 +1688,22 @@ namespace Screenshot_v3_0
         {
             try
             {
-                _config.GeneratePPT = MenuGeneratePPT.IsChecked;
+                // PPT为必选项，不允许取消
+                // 如果用户尝试取消，立即恢复为选中状态
+                if (!MenuGeneratePPT.IsChecked)
+                {
+                    MenuGeneratePPT.IsChecked = true;
+                }
+                
+                // 确保配置中PPT始终启用
+                _config.GeneratePPT = true;
                 _config.Save(_configPath);
-                WriteLine($"生成PPT: {(_config.GeneratePPT ? "启用" : "禁用")}");
-                UpdateStatusDisplay($"生成PPT: {(_config.GeneratePPT ? "已启用" : "已禁用")}");
+                
+                // 不显示状态消息，因为这是必选项
             }
             catch (Exception ex)
             {
-                WriteError($"切换生成PPT功能失败", ex);
-                UpdateStatusDisplay($"切换生成PPT功能失败：{ex.Message}");
+                WriteError($"设置生成PPT功能失败", ex);
             }
         }
 
@@ -1638,13 +1723,107 @@ namespace Screenshot_v3_0
             }
         }
 
+        /// <summary>
+        /// 更新输出模式菜单项状态
+        /// </summary>
+        private void UpdateOutputModeMenuItems()
+        {
+            try
+            {
+                if (MenuOutputNone != null)
+                {
+                    MenuOutputNone.IsChecked = _outputMode == OutputMode.None;
+                }
+                if (MenuOutputAudioOnly != null)
+                {
+                    MenuOutputAudioOnly.IsChecked = _outputMode == OutputMode.AudioOnly;
+                }
+                if (MenuOutputVideoOnly != null)
+                {
+                    MenuOutputVideoOnly.IsChecked = _outputMode == OutputMode.VideoOnly;
+                }
+                if (MenuOutputAudioAndVideo != null)
+                {
+                    MenuOutputAudioAndVideo.IsChecked = _outputMode == OutputMode.AudioAndVideo;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteError($"更新输出模式菜单项状态失败", ex);
+            }
+        }
+
+        private void MenuOutputNone_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _outputMode = OutputMode.None;
+                UpdateOutputModeMenuItems();
+                WriteLine("输出模式：不生成音视频（只生成PPT/PDF和截图）");
+                UpdateStatusDisplay("输出模式：不生成音视频");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"设置输出模式失败", ex);
+                UpdateStatusDisplay($"设置输出模式失败：{ex.Message}");
+            }
+        }
+
+        private void MenuOutputAudioOnly_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _outputMode = OutputMode.AudioOnly;
+                UpdateOutputModeMenuItems();
+                WriteLine("输出模式：只生成音频");
+                UpdateStatusDisplay("输出模式：只生成音频");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"设置输出模式失败", ex);
+                UpdateStatusDisplay($"设置输出模式失败：{ex.Message}");
+            }
+        }
+
+        private void MenuOutputVideoOnly_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _outputMode = OutputMode.VideoOnly;
+                UpdateOutputModeMenuItems();
+                WriteLine("输出模式：只生成视频文件");
+                UpdateStatusDisplay("输出模式：只生成视频文件");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"设置输出模式失败", ex);
+                UpdateStatusDisplay($"设置输出模式失败：{ex.Message}");
+            }
+        }
+
+        private void MenuOutputAudioAndVideo_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _outputMode = OutputMode.AudioAndVideo;
+                UpdateOutputModeMenuItems();
+                WriteLine("输出模式：音频+视频");
+                UpdateStatusDisplay("输出模式：音频+视频");
+            }
+            catch (Exception ex)
+            {
+                WriteError($"设置输出模式失败", ex);
+                UpdateStatusDisplay($"设置输出模式失败：{ex.Message}");
+            }
+        }
+
 
         private void ScreenshotTimer_Tick(object? sender, EventArgs e)
         {
             try
             {
-                // 只有在截图功能启用且正在录制时才处理
-                if (!_isScreenshotEnabled || !_isVideoRecording) return;
+                // 截图功能始终启用，只需要检查是否正在录制
+                if (!_isVideoRecording) return;
 
                 DateTime now = DateTime.Now;
                 TimeSpan elapsed = now - _lastScreenshotTime;
@@ -1904,7 +2083,7 @@ namespace Screenshot_v3_0
                         bitmap.Save(filePath, ImageFormat.Jpeg);
                     }
                     
-                    WriteLine($"截图已保存: {filePath}");
+                    WriteLine("截图已保存（JPG文件）");
                     
                     // 增加截图计数
                     _screenshotCount++;
@@ -1944,21 +2123,35 @@ namespace Screenshot_v3_0
                         }
                     }
                     
-                    // 如果图片已成功添加到PPT或PDF，删除JPG文件（因为已包含在PPT/PDF中）
+                    // 如果图片已成功添加到PPT或PDF，且用户选择不保留JPG文件，则删除JPG文件
+                    // 注意：PPT是必选项，所以图片应该总是会被添加到PPT
                     if ((_config.GeneratePPT && addedToPPT) || (_config.GeneratePDF && addedToPDF))
                     {
-                        try
+                        if (!_keepJpgFiles)
                         {
-                            if (File.Exists(filePath))
+                            try
                             {
-                                File.Delete(filePath);
-                                WriteLine($"已删除JPG文件（已添加到PPT/PDF）: {filePath}");
+                                if (File.Exists(filePath))
+                                {
+                                    File.Delete(filePath);
+                                    WriteLine("已删除JPG文件（已添加到PPT/PDF）");
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                WriteError($"删除JPG文件失败: {filePath}", ex);
                             }
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            WriteError($"删除JPG文件失败: {filePath}", ex);
+                            WriteLine("保留JPG文件");
                         }
+                    }
+                    else
+                    {
+                        // 如果没有添加到PPT/PDF（这种情况理论上不应该发生，因为PPT是必选项）
+                        // 为了安全，始终保留文件
+                        WriteLine("保留JPG文件（未添加到PPT/PDF）");
                     }
                 }
             }
@@ -1980,7 +2173,7 @@ namespace Screenshot_v3_0
                     _pptFilePath = Path.Combine(_screenshotDir, $"PPT{timestamp}.pptx");
                     _pptGenerator = new PPTGenerator(_pptFilePath, width, height);
                     _pptGenerator.Initialize();
-                    WriteLine($"PPT生成器已初始化: {_pptFilePath}");
+                    WriteLine("PPT生成器已初始化");
                 }
                 
                 if (_config.GeneratePDF)
@@ -1989,7 +2182,7 @@ namespace Screenshot_v3_0
                     _pdfFilePath = Path.Combine(_screenshotDir, $"PDF{timestamp}.pdf");
                     _pdfGenerator = new PDFGenerator(_pdfFilePath, width, height);
                     _pdfGenerator.Initialize();
-                    WriteLine($"PDF生成器已初始化: {_pdfFilePath}");
+                    WriteLine("PDF生成器已初始化");
                 }
                 
                 _pptPdfInitialized = true;
@@ -2007,13 +2200,13 @@ namespace Screenshot_v3_0
                 if (_config.GeneratePPT && _pptGenerator != null)
                 {
                     _pptGenerator.Finish();
-                    WriteLine($"PPT文件已生成: {_pptFilePath}");
+                    WriteLine("PPT文件已生成");
                 }
                 
                 if (_config.GeneratePDF && _pdfGenerator != null)
                 {
                     _pdfGenerator.Finish();
-                    WriteLine($"PDF文件已生成: {_pdfFilePath}");
+                    WriteLine("PDF文件已生成");
                 }
             }
             catch (Exception ex)

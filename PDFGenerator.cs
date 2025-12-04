@@ -33,7 +33,7 @@ namespace Screenshot_v3_0
             {
                 _document = new PdfDocument();
                 _isInitialized = true;
-                WriteLine($"PDF文件已初始化: {_filePath}, 尺寸: {_pageWidth}x{_pageHeight}");
+                WriteLine($"PDF文件已初始化, 尺寸: {_pageWidth}x{_pageHeight}");
             }
             catch (Exception ex)
             {
@@ -88,7 +88,7 @@ namespace Screenshot_v3_0
                 if (_document != null)
                 {
                     _document.Save(_filePath);
-                    WriteLine($"PDF文件已生成完成: {_filePath}, 共 {_document.Pages.Count} 页");
+                    WriteLine($"PDF文件已生成完成, 共 {_document.Pages.Count} 页");
                 }
             }
             catch (Exception ex)

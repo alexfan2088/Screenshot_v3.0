@@ -38,6 +38,9 @@ namespace Screenshot_v3_0
         public bool GeneratePPT { get; set; } = true; // 生成PPT，默认启用
         public bool GeneratePDF { get; set; } = false; // 生成PDF，默认禁用
         
+        // 截图参数
+        public bool KeepJpgFiles { get; set; } = true; // 保留JPG文件，默认启用
+        
         // 区域显示参数
         public bool ShowRegionOverlay { get; set; } = false; // 显示上次记录的矩形框，默认不显示
 

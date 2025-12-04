@@ -126,7 +126,7 @@ namespace Screenshot_v3_0
                 _shapeId = 2;
 
                 _isInitialized = true;
-                WriteLine($"PPT文件已初始化: {_filePath}, 幻灯片页面尺寸(像素): {_slideWidth}x{_slideHeight}");
+                WriteLine($"PPT文件已初始化, 幻灯片页面尺寸(像素): {_slideWidth}x{_slideHeight}");
             }
             catch (Exception ex)
             {
@@ -289,7 +289,7 @@ namespace Screenshot_v3_0
                 _presentation.Dispose();
                 _presentation = null;
 
-                WriteLine($"PPT文件已生成完成: {_filePath}, 共 {_slideId - 256} 张幻灯片");
+                WriteLine($"PPT文件已生成完成, 共 {_slideId - 256} 张幻灯片");
             }
             catch (Exception ex)
             {

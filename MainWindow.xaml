@@ -33,20 +33,70 @@
               </Trigger>
             </Style.Triggers>
           </Style>
+          <!-- 生成PPT菜单项样式：勾选标记颜色为深灰色，内容左对齐 -->
+          <Style x:Key="MenuGeneratePPTStyle" TargetType="MenuItem">
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+              <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                  <Border x:Name="Border" Background="{TemplateBinding Background}" Padding="2">
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" MinWidth="20"/>
+                        <ColumnDefinition Width="*"/>
+                      </Grid.ColumnDefinitions>
+                      <!-- 深灰色勾选标记 -->
+                      <Path x:Name="CheckMark" Grid.Column="0" Width="14" Height="14" Margin="3,0,3,0" VerticalAlignment="Center" 
+                            Data="M 0,5.5 L 4.5,10 L 12,2.5" 
+                            StrokeThickness="2" 
+                            Stroke="#505050" 
+                            Fill="Transparent"
+                            StrokeStartLineCap="Round" 
+                            StrokeEndLineCap="Round" 
+                            StrokeLineJoin="Round"
+                            Visibility="Collapsed"/>
+                      <ContentPresenter Grid.Column="1" ContentSource="Header" RecognizesAccessKey="True" 
+                                        VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                    </Grid>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsChecked" Value="True">
+                      <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False">
+                      <Setter Property="Foreground" Value="Gray"/>
+                    </Trigger>
+                    <Trigger Property="IsMouseOver" Value="True">
+                      <Setter TargetName="Border" Property="Background" Value="#E0E0E0"/>
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Setter.Value>
+            </Setter>
+          </Style>
         </Menu.Resources>
         <MenuItem Header="设置">
-          <MenuItem Header="参数配置" Click="MenuSettings_Click"/>
+          <MenuItem Header="音视频参数" Click="MenuSettings_Click"/>
           <Separator/>
-          <MenuItem Header="截图" x:Name="MenuScreenshot" IsCheckable="True" IsChecked="True" Click="MenuScreenshot_Click"/>
-          <MenuItem Header="生成PPT" x:Name="MenuGeneratePPT" IsCheckable="True" IsChecked="True" Click="MenuGeneratePPT_Click"/>
-          <MenuItem Header="生成PDF" x:Name="MenuGeneratePDF" IsCheckable="True" IsChecked="False" Click="MenuGeneratePDF_Click"/>
+          <MenuItem Header="音视频模式">
+            <MenuItem Header="不生成音、视频文件" x:Name="MenuOutputNone" IsCheckable="True" IsChecked="False" StaysOpenOnClick="True" Click="MenuOutputNone_Click"/>
+            <MenuItem Header="只生成音频文件" x:Name="MenuOutputAudioOnly" IsCheckable="True" IsChecked="False" StaysOpenOnClick="True" Click="MenuOutputAudioOnly_Click"/>
+            <MenuItem Header="只生成视频文件" x:Name="MenuOutputVideoOnly" IsCheckable="True" IsChecked="False" StaysOpenOnClick="True" Click="MenuOutputVideoOnly_Click"/>
+            <MenuItem Header="生成音频+视频文件" x:Name="MenuOutputAudioAndVideo" IsCheckable="True" IsChecked="True" StaysOpenOnClick="True" Click="MenuOutputAudioAndVideo_Click"/>
+          </MenuItem>
+          <Separator/>
+          <MenuItem Header="    保留JPG文件" x:Name="MenuScreenshot" IsCheckable="True" IsChecked="True" StaysOpenOnClick="True" Click="MenuScreenshot_Click" ToolTip="控制是否保留截图JPG文件（截图功能始终启用，用于生成PPT）" Style="{StaticResource MenuGeneratePPTStyle}"/>
+          <MenuItem Header="    生成PPT" x:Name="MenuGeneratePPT" IsCheckable="True" IsChecked="True" IsEnabled="False" StaysOpenOnClick="True" Click="MenuGeneratePPT_Click" Style="{StaticResource MenuGeneratePPTStyle}"/>
+          <MenuItem Header="    生成PDF" x:Name="MenuGeneratePDF" IsCheckable="True" IsChecked="False" StaysOpenOnClick="True" Click="MenuGeneratePDF_Click" Style="{StaticResource MenuGeneratePPTStyle}"/>
           <Separator/>
           <MenuItem Header="日志设置">
-            <MenuItem Header="输出日志" x:Name="MenuLogEnabled" IsCheckable="True" IsChecked="True" Click="MenuLogEnabled_Click"/>
-            <MenuItem Header="不输出日志" x:Name="MenuLogDisabled" IsCheckable="True" IsChecked="False" Click="MenuLogDisabled_Click"/>
+            <MenuItem Header="输出日志" x:Name="MenuLogEnabled" IsCheckable="True" IsChecked="True" StaysOpenOnClick="True" Click="MenuLogEnabled_Click"/>
+            <MenuItem Header="不输出日志" x:Name="MenuLogDisabled" IsCheckable="True" IsChecked="False" StaysOpenOnClick="True" Click="MenuLogDisabled_Click"/>
             <Separator/>
-            <MenuItem Header="日志文件覆盖" x:Name="MenuLogFileOverwrite" IsCheckable="True" IsChecked="True" Click="MenuLogFileOverwrite_Click"/>
-            <MenuItem Header="日志文件叠加" x:Name="MenuLogFileAppend" IsCheckable="True" IsChecked="False" Click="MenuLogFileAppend_Click"/>
+            <MenuItem Header="日志文件覆盖" x:Name="MenuLogFileOverwrite" IsCheckable="True" IsChecked="True" StaysOpenOnClick="True" Click="MenuLogFileOverwrite_Click"/>
+            <MenuItem Header="日志文件叠加" x:Name="MenuLogFileAppend" IsCheckable="True" IsChecked="False" StaysOpenOnClick="True" Click="MenuLogFileAppend_Click"/>
           </MenuItem>
         </MenuItem>
       </Menu>
