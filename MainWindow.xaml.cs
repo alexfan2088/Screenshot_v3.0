@@ -554,76 +554,152 @@ namespace Screenshot_v3_0
                         
                         List<string> generatedFiles = new List<string>();
                         
-                        // 根据输出模式处理视频和音频
-                        if (_outputMode == OutputMode.None)
+                        // 第一步：停止所有录制（但不立即完成编码）
+                        // 停止截图定时器
+                        Dispatcher.Invoke(() =>
                         {
-                            // 不生成音视频模式：只处理PPT/PDF和截图
-                            WriteLine("不生成音视频模式：跳过音视频处理");
-                        }
-                        else if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
+                            if (_screenshotTimer != null && _screenshotTimer.IsEnabled)
+                            {
+                                _screenshotTimer.Stop();
+                                WriteLine("截图定时器已停止");
+                            }
+                        });
+                        
+                        // 停止音频录制（如果需要）
+                        string? audioFilePathForVideo = null;
+                        if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                         {
-                            // 先发送停止信号给 FFmpeg（不等待完成）
-                            _videoEncoder?.RequestStop();
+                            // 断开音频事件连接（避免继续写入数据，仅在 AudioAndVideo 模式下可能已连接）
+                            if (_outputMode == OutputMode.AudioAndVideo)
+                            {
+                                _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
+                            }
                             
-                            // 更新状态：正在生成MP4文件
+                            // 停止音频录制
+                            WriteLine("停止音频录制");
+                            _audioRecorder.Stop();
+                            
+                            // 等待音频文件写入完成
+                            System.Threading.Thread.Sleep(1000);
+                            
+                            // 查找临时音频文件（用于后续合并到视频）
+                            var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
+                            if (tempAudioFiles.Length == 0)
+                            {
+                                tempAudioFiles = Directory.GetFiles(_workDir, "temp_audio_*.wav");
+                            }
+                            
+                            if (tempAudioFiles.Length > 0)
+                            {
+                                var latestAudioFile = tempAudioFiles.OrderByDescending(f => File.GetCreationTime(f)).First();
+                                var audioFileInfo = new FileInfo(latestAudioFile);
+                                
+                                if (audioFileInfo.Length > 0)
+                                {
+                                    audioFilePathForVideo = latestAudioFile;
+                                    _videoEncoder?.SetAudioFile(latestAudioFile);
+                                }
+                            }
+                            
+                            // 发送停止信号给 FFmpeg（但不等待完成，稍后再完成编码）
+                            _videoEncoder?.RequestStop();
+                        }
+                        else if (_outputMode == OutputMode.AudioOnly)
+                        {
+                            // 只生成音频模式：停止音频录制
+                            WriteLine("停止音频录制");
+                            _audioRecorder.Stop();
+                            
+                            // 等待音频文件写入完成
+                            System.Threading.Thread.Sleep(1000);
+                        }
+                        
+                        // 第二步：生成PPT文件
+                        if (_config.GeneratePPT && _pptFilePath != null)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                _currentOperation = "正在生成PPT文件";
+                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                            });
+                            
+                            WriteLine("准备完成PPT生成");
+                            if (_pptGenerator != null)
+                            {
+                                _pptGenerator.Finish();
+                                WriteLine("PPT文件已生成");
+                            }
+                            
+                            if (_pptFilePath != null && File.Exists(_pptFilePath))
+                            {
+                                generatedFiles.Add("PPT文件");
+                            }
+                        }
+                        
+                        // 第三步：生成PDF文件
+                        if (_config.GeneratePDF && _pdfFilePath != null)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                _currentOperation = "正在生成PDF文件";
+                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                            });
+                            
+                            WriteLine("准备完成PDF生成");
+                            if (_pdfGenerator != null)
+                            {
+                                _pdfGenerator.Finish();
+                                WriteLine("PDF文件已生成");
+                            }
+                            
+                            if (_pdfFilePath != null && File.Exists(_pdfFilePath))
+                            {
+                                generatedFiles.Add("PDF文件");
+                            }
+                        }
+                        
+                        // 第四步：处理声音文件（AudioOnly模式）
+                        if (_outputMode == OutputMode.AudioOnly)
+                        {
+                            Dispatcher.Invoke(() =>
+                            {
+                                _currentOperation = "正在生成音频文件";
+                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                            });
+                            
+                            // 查找生成的音频文件（可能是 wav 或 m4a）
+                            if (_currentAudioPath != null && File.Exists(_currentAudioPath))
+                            {
+                                string ext = Path.GetExtension(_currentAudioPath).ToLower();
+                                string audioType = ext == ".wav" ? "WAV" : "MP3";
+                                generatedFiles.Add(ext == ".wav" ? "WAV文件" : "MP3文件");
+                                WriteLine($"{audioType}文件已生成");
+                            }
+                            else
+                            {
+                                // 尝试查找最新的音频文件
+                                var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
+                                if (tempAudioFiles.Length > 0)
+                                {
+                                    generatedFiles.Add("WAV文件");
+                                    WriteLine("WAV文件已生成");
+                                }
+                            }
+                        }
+                        
+                        // 第五步：完成视频文件（VideoOnly/AudioAndVideo模式）
+                        if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
+                        {
                             Dispatcher.Invoke(() =>
                             {
                                 _currentOperation = "正在生成MP4文件";
                                 UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
                             });
                             
-                            // VideoOnly 和 AudioAndVideo 模式都需要处理音频
-                            if (_outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly)
-                            {
-                                // 断开音频事件连接（避免继续写入数据，仅在 AudioAndVideo 模式下可能已连接）
-                                if (_outputMode == OutputMode.AudioAndVideo)
-                                {
-                                    _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
-                                }
-                                
-                                // 立即停止音频录制（与视频同时停止）
-                                WriteLine($"停止音频录制");
-                                _audioRecorder.Stop();
-                                
-                                // 等待音频管道数据刷新（实时合成模式）或音频文件写入完成（文件合并模式）
-                                System.Threading.Thread.Sleep(1000);
-                                
-                                // 检查是否是实时合成模式（_hasAudioInVideo = true 且没有找到音频设备）
-                                // 如果是实时合成模式，不需要查找和合并音频文件
-                                // 如果是文件合并模式，需要查找音频文件并合并
-                                
-                                // 注意：VideoEncoder.Finish() 会根据 _hasAudioInVideo 判断是否需要合并
-                                // 如果是实时合成模式，_hasAudioInVideo = true，Finish() 会跳过合并
-                                // 如果是文件合并模式，_hasAudioInVideo = false，Finish() 会查找 _tempAudioPath 并合并
-                                
-                                // 只有在文件合并模式下，才需要查找和设置音频文件路径
-                                // 实时合成模式下，音频已经通过管道写入 FFmpeg，无需合并
-                                
-                                // 尝试查找临时音频文件（仅在文件合并模式下需要）
-                                var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
-                                if (tempAudioFiles.Length == 0)
-                                {
-                                    tempAudioFiles = Directory.GetFiles(_workDir, "temp_audio_*.wav");
-                                }
-                                
-                                if (tempAudioFiles.Length > 0)
-                                {
-                                    var latestAudioFile = tempAudioFiles.OrderByDescending(f => File.GetCreationTime(f)).First();
-                                    var audioFileInfo = new FileInfo(latestAudioFile);
-                                    
-                                    // 设置音频文件路径（VideoEncoder.Finish() 会根据 _hasAudioInVideo 决定是否使用）
-                                    if (audioFileInfo.Length > 0)
-                                    {
-                                        _videoEncoder?.SetAudioFile(latestAudioFile);
-                                    }
-                                }
-                            }
-                            
-                            // 现在停止视频录制并完成编码
-                            // 注意：如果是实时合成模式，Finish() 会跳过合并；如果是文件合并模式，Finish() 会合并音频
-                            WriteLine($"准备停止视频录制（FFmpeg）并完成编码");
-                            _videoEncoder?.Finish(); // 这会发送 'q' 给 FFmpeg，等待退出，然后根据模式决定是否合并音频
-                            WriteLine($"视频编码完成");
+                            // 现在完成视频编码（会合并音频，如果需要）
+                            WriteLine("准备停止视频录制（FFmpeg）并完成编码");
+                            _videoEncoder?.Finish(); // 这会等待 FFmpeg 退出，然后根据模式决定是否合并音频
+                            WriteLine("视频编码完成");
 
                             // 释放资源
                             _videoEncoder?.Dispose();
@@ -634,68 +710,8 @@ namespace Screenshot_v3_0
                                 generatedFiles.Add("MP4文件");
                             }
                         }
-                        else if (_outputMode == OutputMode.AudioOnly)
-                        {
-                            // 只生成音频模式
-                            WriteLine($"停止音频录制");
-                            _audioRecorder.Stop();
-                            
-                            // 等待音频文件写入完成
-                            System.Threading.Thread.Sleep(1000);
-                            
-                            // 查找生成的音频文件（可能是 wav 或 m4a）
-                            if (_currentAudioPath != null && File.Exists(_currentAudioPath))
-                            {
-                                string ext = Path.GetExtension(_currentAudioPath).ToLower();
-                                generatedFiles.Add(ext == ".wav" ? "WAV文件" : "MP3文件");
-                            }
-                            else
-                            {
-                                // 尝试查找最新的音频文件
-                                var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
-                                if (tempAudioFiles.Length > 0)
-                                {
-                                    generatedFiles.Add("WAV文件");
-                                }
-                            }
-                        }
-
-                        // 完成PPT和PDF生成（在MP4生成完成后立即执行）
-                        if (_config.GeneratePPT || _config.GeneratePDF)
-                        {
-                            if (_config.GeneratePPT && _pptFilePath != null)
-                            {
-                                Dispatcher.Invoke(() =>
-                                {
-                                    _currentOperation = "正在生成PPT文件";
-                                    UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
-                                });
-                            }
-                            
-                            if (_config.GeneratePDF && _pdfFilePath != null)
-                            {
-                                Dispatcher.Invoke(() =>
-                                {
-                                    _currentOperation = "正在生成PDF文件";
-                                    UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
-                                });
-                            }
-                        }
                         
-                        WriteLine($"准备完成PPT和PDF生成");
-                        FinalizePPTAndPDF();
-                        WriteLine($"PPT和PDF生成完成");
-                        
-                        // 收集所有生成的文件类型
-                        if (_config.GeneratePPT && _pptFilePath != null && File.Exists(_pptFilePath))
-                        {
-                            generatedFiles.Add("PPT文件");
-                        }
-                        if (_config.GeneratePDF && _pdfFilePath != null && File.Exists(_pdfFilePath))
-                        {
-                            generatedFiles.Add("PDF文件");
-                        }
-                        // 如果选择了保留JPG文件，且有截图，则添加JPG文件到列表
+                        // 收集JPG文件（如果选择了保留JPG文件）
                         if (_keepJpgFiles && _screenshotCount > 0)
                         {
                             generatedFiles.Add("JPG文件");
@@ -2224,3 +2240,4 @@ namespace Screenshot_v3_0
         }
     }
 }
+
