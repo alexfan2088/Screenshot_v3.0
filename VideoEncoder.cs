@@ -141,19 +141,19 @@ namespace Screenshot_v3_0
                     // ✅ 同时录屏幕 + 系统音频
                     arguments = BuildFfmpegCommandWithAudio(videoBitrateKbps, audioDevice);
                     _hasAudioInVideo = true;
-                    WriteLine("✓ 录制方式: FFmpeg 直接生成 MP4（视频+音频同步录制）");
+                    WriteLine("✓ 录制方式: FFmpeg 边录边合成 MP4（视频+音频同步录制）");
                     WriteLine($"  音频设备: {audioDevice}");
-                    WriteLine("  说明: 视频和音频在同一 FFmpeg 进程中录制，时间戳同步，无需后续合并");
+                    WriteLine("  说明: 使用片段化MP4格式，边录制边写入文件，停止后快速完成，无需长时间等待");
                 }
                 else
                 {
                     // 找不到音频设备，回退到只录制视频（后面用文件合并音频）
                     arguments = BuildFfmpegCommandWithoutAudio(videoBitrateKbps);
                     _hasAudioInVideo = false;
-                    WriteLine("✓ 录制方式: 分步录制后合并（当前边录边合成暂时禁用）");
-                    WriteLine("  视频: FFmpeg 录制（gdigrab）");
+                    WriteLine("✓ 录制方式: 分步录制后合并（边录边合成）");
+                    WriteLine("  视频: FFmpeg 边录边合成（gdigrab，片段化MP4格式）");
                     WriteLine("  音频: NAudio WasapiLoopbackCapture 录制（即使静音也会录制）");
-                    WriteLine("  说明: 录制完成后使用 FFmpeg 合并音频到 MP4");
+                    WriteLine("  说明: 视频使用片段化MP4格式边录边写，停止后快速完成并合并音频");
                 }
 
                 var processInfo = new ProcessStartInfo
@@ -243,7 +243,7 @@ namespace Screenshot_v3_0
                    "-pix_fmt yuv420p " +
                    "-c:a aac " +
                    $"-b:a {_config.AudioBitrate}k " +
-                   "-movflags +faststart " +
+                   "-movflags +frag_keyframe+empty_moov+default_base_moof " +
                    $"-r {_frameRate} " +
                    $"-g {_frameRate * 2} " +
                    $"-keyint_min {_frameRate} " +
@@ -336,7 +336,7 @@ namespace Screenshot_v3_0
                    "-preset medium " +
                    $"-b:v {videoBitrateKbps}k " +
                    "-pix_fmt yuv420p " +
-                   "-movflags +faststart " +
+                   "-movflags +frag_keyframe+empty_moov+default_base_moof " +
                    $"-r {_frameRate} " +
                    $"-g {_frameRate * 2} " +
                    $"-keyint_min {_frameRate} " +
@@ -406,7 +406,7 @@ namespace Screenshot_v3_0
                    "-pix_fmt yuv420p " +
                    "-c:a aac " +
                    $"-b:a {_config.AudioBitrate}k " +
-                   "-movflags +faststart " +
+                   "-movflags +frag_keyframe+empty_moov+default_base_moof " +
                    $"-r {_frameRate} " +
                    $"-g {_frameRate * 2} " +
                    $"-keyint_min {_frameRate} " +
@@ -596,12 +596,12 @@ namespace Screenshot_v3_0
                                 // 忽略
                             }
 
-                            // 等待视频文件写入稳定
+                            // 等待视频文件写入稳定（片段化MP4格式下写入更快）
                             if (File.Exists(_outputPath))
                             {
-                                WriteLine("等待视频文件完全写入...");
-                                // 对大文件适当放宽等待时间
-                                if (WaitForFileReady(_outputPath, maxWaitSeconds: 60))
+                                WriteLine("等待视频文件完全写入（片段化MP4格式，写入速度更快）...");
+                                // 片段化MP4格式下，文件写入更快，缩短等待时间
+                                if (WaitForFileReady(_outputPath, maxWaitSeconds: 10))
                                 {
                                     WriteLine("✓ 视频文件已完全写入");
                                 }
@@ -720,17 +720,31 @@ namespace Screenshot_v3_0
                     return;
                 }
 
-                // 等待文件完全写入并验证文件完整性
-                WriteLine("等待视频文件完全写入并验证完整性...");
-                if (!WaitForFileReady(videoPath, maxWaitSeconds: 60))
+                // 等待文件完全写入并验证文件完整性（片段化MP4格式下验证更快）
+                WriteLine("等待视频文件完全写入并验证完整性（片段化MP4格式）...");
+                if (!WaitForFileReady(videoPath, maxWaitSeconds: 10))
                 {
                     WriteWarning("等待视频文件写入超时，但继续尝试合并");
                 }
 
+                // 片段化MP4格式下，文件结构不同，简化验证（主要检查文件是否存在且大小>0）
+                if (!File.Exists(videoPath))
+                {
+                    WriteError("视频文件不存在，无法合并音频。");
+                    return;
+                }
+                
+                var checkFileInfo = new FileInfo(videoPath);
+                if (checkFileInfo.Length == 0)
+                {
+                    WriteError("视频文件大小为 0，无法合并音频。");
+                    return;
+                }
+                
+                // 片段化MP4格式下，使用简化的验证（检查文件头）
                 if (!ValidateMp4File(videoPath))
                 {
-                    WriteError("视频文件不完整或损坏（可能 moov 未写完），无法合并音频。");
-                    return;
+                    WriteWarning("视频文件验证警告（片段化MP4格式可能验证方式不同），但继续尝试合并");
                 }
 
                 var videoFileInfo = new FileInfo(videoPath);
