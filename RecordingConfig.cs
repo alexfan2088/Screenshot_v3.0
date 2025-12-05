@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json;
 using static Screenshot_v3_0.Logger;
 
@@ -43,6 +44,11 @@ namespace Screenshot_v3_0
         
         // 区域显示参数
         public bool ShowRegionOverlay { get; set; } = false; // 显示上次记录的矩形框，默认不显示
+
+        // FFmpeg参数
+        public string? FfmpegPath { get; set; } // FFmpeg可执行文件路径，如果为空则自动查找
+        public string? FfmpegPreset { get; set; } = "veryfast"; // FFmpeg编码预设: ultrafast/superfast/veryfast/faster/fast/medium/slow/slower/veryslow
+        public int Crf { get; set; } = 23; // CRF值: 0-51，默认23（18-28为常用范围，值越小质量越高）
 
         /// <summary>
         /// 获取视频码率（Mbps）
@@ -126,18 +132,75 @@ namespace Screenshot_v3_0
         {
             try
             {
+                RecordingConfig config;
                 if (File.Exists(configPath))
                 {
                     string json = File.ReadAllText(configPath);
-                    var config = JsonConvert.DeserializeObject<RecordingConfig>(json);
-                    return config ?? new RecordingConfig();
+                    var deserialized = JsonConvert.DeserializeObject<RecordingConfig>(json);
+                    config = deserialized ?? new RecordingConfig();
                 }
+                else
+                {
+                    config = new RecordingConfig();
+                }
+
+                // 如果FFmpeg路径未配置，尝试自动查找
+                if (string.IsNullOrWhiteSpace(config.FfmpegPath))
+                {
+                    config.FfmpegPath = FindFfmpegPath();
+                }
+
+                return config;
             }
             catch (Exception ex)
             {
                 WriteError($"加载配置失败", ex);
             }
-            return new RecordingConfig();
+            var defaultConfig = new RecordingConfig();
+            defaultConfig.FfmpegPath = FindFfmpegPath();
+            return defaultConfig;
+        }
+
+        /// <summary>
+        /// 自动查找FFmpeg可执行文件路径
+        /// </summary>
+        private static string? FindFfmpegPath()
+        {
+            // 常见路径列表
+            var possiblePaths = new[]
+            {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ffmpeg.exe"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ffmpeg", "ffmpeg.exe"),
+                @"C:\ffmpeg\bin\ffmpeg.exe",
+                @"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+                @"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+            };
+
+            // 检查PATH环境变量
+            var pathEnv = Environment.GetEnvironmentVariable("PATH");
+            if (!string.IsNullOrEmpty(pathEnv))
+            {
+                var paths = pathEnv.Split(Path.PathSeparator);
+                foreach (var path in paths)
+                {
+                    var ffmpegPath = Path.Combine(path, "ffmpeg.exe");
+                    if (File.Exists(ffmpegPath))
+                    {
+                        return ffmpegPath;
+                    }
+                }
+            }
+
+            // 检查常见路径
+            foreach (var path in possiblePaths)
+            {
+                if (File.Exists(path))
+                {
+                    return path;
+                }
+            }
+
+            return null;
         }
     }
 }

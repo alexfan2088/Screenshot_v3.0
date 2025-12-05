@@ -9,6 +9,7 @@ using System.Drawing.Imaging;
 using System.Windows.Threading;
 using static Screenshot_v3_0.Logger;
 
+
 namespace Screenshot_v3_0
 {
     /// <summary>
@@ -24,7 +25,7 @@ namespace Screenshot_v3_0
 
     public partial class MainWindow : Window
     {
-        private readonly AudioRecorder _audioRecorder = new();
+        private readonly AudioRecorder _audioRecorder;
         private VideoEncoder? _videoEncoder;
         private RecordingConfig _config;
         private readonly string _workDir;
@@ -107,6 +108,8 @@ namespace Screenshot_v3_0
             // 强制启用PPT生成（必选项）
             _config.GeneratePPT = true;
             
+            _audioRecorder = new AudioRecorder(_config.AudioSampleRate, 2);
+
             // 初始化日志系统
             Logger.Enabled = _config.LogEnabled == 1;
             Logger.SetLogFileMode(_config.LogFileMode);
@@ -419,40 +422,44 @@ namespace Screenshot_v3_0
                     _videoEncoder = null;
                 }
 
-                // 根据输出模式决定是否开始音频录制
+               // === 2. 根据输出模式决定是否开始音频录制 ===
                 if (_outputMode == OutputMode.None)
                 {
-                    // 不生成音视频模式，跳过音频录制
+                    // 不生成音视频模式，完全不启用音频
                     _currentAudioPath = null;
                 }
-                else if (_outputMode == OutputMode.AudioOnly || _outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly)
+                else if (_outputMode == OutputMode.AudioOnly)
                 {
-                    // 开始音频录制（使用 NAudio WasapiLoopbackCapture，无需虚拟声卡）
-                    // 注意：无论是否有声音输出，都要录制音频（包括静音）
-                    // AudioRecorder.Start() 会创建与目标同名的临时 wav 文件
-                    // VideoOnly 模式也需要录制音频，以确保生成的视频包含声音
-                    var audioOutputPath = Path.Combine(_workDir, $"audio_{timestamp}.m4a"); // 最终输出路径（不会被使用）
-                    var expectedAudioPath = Path.Combine(_workDir, $"audio_{timestamp}.wav"); // AudioRecorder 实际创建的文件
-                    _currentAudioPath = expectedAudioPath; // 保存音频文件路径
-                    
-                    WriteLine("开始音频录制（NAudio WasapiLoopbackCapture，即使静音也会录制）");
-                    WriteLine("预期WAV文件");
-                    
-                    // 连接音频数据事件，实现边录边合成（仅在音频+视频模式下）
-                    if (_outputMode == OutputMode.AudioAndVideo)
-                    {
-                        _audioRecorder.AudioSampleAvailable += OnAudioSampleAvailable;
-                    }
-                    
+                    // 只生成音频：走“文件模式”,生成 wav 文件
+                    var audioOutputPath = Path.Combine(_workDir, $"audio_{timestamp}.wav");
+                    _currentAudioPath = audioOutputPath;
+
+                    WriteLine("输出模式=只生成音频：AudioRecorder 以文件模式开始录制");
                     _audioRecorder.Start(audioOutputPath);
-                    
-                    // 等待音频录制启动
-                    System.Threading.Thread.Sleep(300);
+
+                    // 给 NAudio 一点时间完成初始化（可选）
+                    Thread.Sleep(200);
                 }
-                else
+                else if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                 {
+                    // 含视频输出：走“管道模式”，音频不落地成临时 wav，直接送给 FFmpeg
                     _currentAudioPath = null;
+
+                    if (_videoEncoder != null)
+                    {
+                        // 提前把音频格式告诉 VideoEncoder，用于拼 ffmpeg 的 -f s16le -ar xxx -ac xx -i pipe:2
+                        _videoEncoder.SetAudioFormat(_config.AudioSampleRate, 2);
+                    }
+
+                    WriteLine("输出模式=含视频：使用 AudioRecorder 管道模式 + FFmpeg 标准输入实时合成");
+
+                    // 管道模式：每一块 PCM 到来，通过事件写进 VideoEncoder
+                    _audioRecorder.AudioSampleAvailable += OnAudioSampleAvailable;
+                    _audioRecorder.StartPipeMode();
+
+                    Thread.Sleep(200);
                 }
+
                 
                 // 启动 FFmpeg 录制视频（仅在需要视频时）
                 if (_outputMode == OutputMode.None)
@@ -531,29 +538,32 @@ namespace Screenshot_v3_0
 
                 // 先禁用按钮，防止重复点击
                 BtnStopVideo.IsEnabled = false;
-                
+                        
                 _isStoppingRecording = true;
                 _statusUpdateTimer?.Stop();
                 _statusUpdateTimer = null;
-                
+                        
                 // 停止录制时长检查定时器
                 _durationCheckTimer?.Stop();
                 _durationCheckTimer = null;
-                
+                        
                 // 立即更新状态显示
                 _currentOperation = "正在停止录制...";
-                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                UpdateStatusDisplayWithScroll(
+                    _currentOperation,
+                    new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)) // 粉红色
+                );
 
                 // 在后台线程执行停止操作，避免阻塞 UI
                 ThreadPool.QueueUserWorkItem(_ =>
                 {
                     try
                     {
-                        WriteLine($"========== 停止录制 ==========");
+                        WriteLine("========== 停止录制 ==========");
                         WriteLine($"输出模式: {_outputMode}");
-                        
+                                
                         List<string> generatedFiles = new List<string>();
-                        
+                                
                         // 第一步：停止所有录制（但不立即完成编码）
                         // 停止截图定时器
                         Dispatcher.Invoke(() =>
@@ -564,141 +574,157 @@ namespace Screenshot_v3_0
                                 WriteLine("截图定时器已停止");
                             }
                         });
-                        
-                        // 停止音频录制（如果需要）
-                        string? audioFilePathForVideo = null;
+                                
+                        // === 停止音频录制（根据输出模式区分） ===
                         if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                         {
-                            // 断开音频事件连接（避免继续写入数据，仅在 AudioAndVideo 模式下可能已连接）
-                            if (_outputMode == OutputMode.AudioAndVideo)
-                            {
-                                _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
-                            }
-                            
-                            // 停止音频录制
-                            WriteLine("停止音频录制");
+                            // 管道模式：只需要停止采集 + 不再往 FFmpeg 写数据
+                            WriteLine("停止音频录制（管道模式）");
+
+                            _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
                             _audioRecorder.Stop();
-                            
-                            // 等待音频文件写入完成
-                            System.Threading.Thread.Sleep(1000);
-                            
-                            // 查找临时音频文件（用于后续合并到视频）
-                            var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
-                            if (tempAudioFiles.Length == 0)
-                            {
-                                tempAudioFiles = Directory.GetFiles(_workDir, "temp_audio_*.wav");
-                            }
-                            
-                            if (tempAudioFiles.Length > 0)
-                            {
-                                var latestAudioFile = tempAudioFiles.OrderByDescending(f => File.GetCreationTime(f)).First();
-                                var audioFileInfo = new FileInfo(latestAudioFile);
-                                
-                                if (audioFileInfo.Length > 0)
-                                {
-                                    audioFilePathForVideo = latestAudioFile;
-                                    _videoEncoder?.SetAudioFile(latestAudioFile);
-                                }
-                            }
-                            
-                            // 发送停止信号给 FFmpeg（但不等待完成，稍后再完成编码）
+
+                            // 通知 VideoEncoder：音频/视频都要结束了，Finish() 会等待 ffmpeg 正常退出
                             _videoEncoder?.RequestStop();
                         }
                         else if (_outputMode == OutputMode.AudioOnly)
                         {
-                            // 只生成音频模式：停止音频录制
-                            WriteLine("停止音频录制");
+                            // 文件模式：AudioRecorder 会在内部完成 wav→aac/m4a 的转换
+                            WriteLine("停止音频录制（文件模式）");
                             _audioRecorder.Stop();
-                            
-                            // 等待音频文件写入完成
-                            System.Threading.Thread.Sleep(1000);
+
+                            // 这里可以适当等待一下磁盘 flush（保守一点）
+                            Thread.Sleep(500);
                         }
-                        
+                        else
+                        {
+                            // OutputMode.None：本来就没启用音频
+                        }
+                                
                         // 第二步：生成PPT文件
                         if (_config.GeneratePPT && _pptFilePath != null)
                         {
                             Dispatcher.Invoke(() =>
                             {
                                 _currentOperation = "正在生成PPT文件";
-                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                                UpdateStatusDisplayWithScroll(
+                                    _currentOperation,
+                                    new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)) // 粉红色
+                                );
                             });
-                            
+                                    
                             WriteLine("准备完成PPT生成");
                             if (_pptGenerator != null)
                             {
                                 _pptGenerator.Finish();
                                 WriteLine("PPT文件已生成");
                             }
-                            
+                                    
                             if (_pptFilePath != null && File.Exists(_pptFilePath))
                             {
                                 generatedFiles.Add("PPT文件");
                             }
                         }
-                        
+                                
                         // 第三步：生成PDF文件
                         if (_config.GeneratePDF && _pdfFilePath != null)
                         {
                             Dispatcher.Invoke(() =>
                             {
                                 _currentOperation = "正在生成PDF文件";
-                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                                UpdateStatusDisplayWithScroll(
+                                    _currentOperation,
+                                    new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)) // 粉红色
+                                );
                             });
-                            
+                                    
                             WriteLine("准备完成PDF生成");
                             if (_pdfGenerator != null)
                             {
                                 _pdfGenerator.Finish();
                                 WriteLine("PDF文件已生成");
                             }
-                            
+                                    
                             if (_pdfFilePath != null && File.Exists(_pdfFilePath))
                             {
                                 generatedFiles.Add("PDF文件");
                             }
                         }
-                        
+                                
                         // 第四步：处理声音文件（AudioOnly模式）
                         if (_outputMode == OutputMode.AudioOnly)
                         {
                             Dispatcher.Invoke(() =>
                             {
                                 _currentOperation = "正在生成音频文件";
-                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                                UpdateStatusDisplayWithScroll(
+                                    _currentOperation,
+                                    new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)) // 粉红色
+                                );
                             });
-                            
-                            // 查找生成的音频文件（可能是 wav 或 m4a）
+
+                            // 优先使用 _currentAudioPath（Start 时指定的输出路径，一般是 .wav）
                             if (_currentAudioPath != null && File.Exists(_currentAudioPath))
                             {
-                                string ext = Path.GetExtension(_currentAudioPath).ToLower();
-                                string audioType = ext == ".wav" ? "WAV" : "MP3";
-                                generatedFiles.Add(ext == ".wav" ? "WAV文件" : "MP3文件");
-                                WriteLine($"{audioType}文件已生成");
+                                string ext = Path.GetExtension(_currentAudioPath).ToLowerInvariant();
+                                string label;
+
+                                if (ext == ".m4a")
+                                    label = "M4A音频文件";
+                                else if (ext == ".wav")
+                                    label = "WAV音频文件";
+                                else if (ext == ".mp3")
+                                    label = "MP3音频文件";
+                                else
+                                    label = $"音频文件({ext})";
+
+                                generatedFiles.Add(label);
+                                WriteLine($"{label}已生成");
                             }
                             else
                             {
-                                // 尝试查找最新的音频文件
-                                var tempAudioFiles = Directory.GetFiles(_workDir, "audio_*.wav");
+                                // 兜底：找最新的 audio_* 文件
+                                var tempAudioFiles = Directory
+                                    .GetFiles(_workDir, "audio_*.*")
+                                    .OrderByDescending(f => File.GetCreationTime(f))
+                                    .ToArray();
+
                                 if (tempAudioFiles.Length > 0)
                                 {
-                                    generatedFiles.Add("WAV文件");
-                                    WriteLine("WAV文件已生成");
+                                    var f = tempAudioFiles[0];
+                                    string ext = Path.GetExtension(f).ToLowerInvariant();
+                                    string label;
+
+                                    if (ext == ".m4a")
+                                        label = "M4A音频文件";
+                                    else if (ext == ".wav")
+                                        label = "WAV音频文件";
+                                    else if (ext == ".mp3")
+                                        label = "MP3音频文件";
+                                    else
+                                        label = $"音频文件({ext})";
+
+                                    generatedFiles.Add(label);
+                                    WriteLine($"{label}已生成");
                                 }
                             }
                         }
-                        
+                                
                         // 第五步：完成视频文件（VideoOnly/AudioAndVideo模式）
                         if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                         {
                             Dispatcher.Invoke(() =>
                             {
                                 _currentOperation = "正在生成MP4文件";
-                                UpdateStatusDisplayWithScroll(_currentOperation, new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203))); // 粉红色
+                                UpdateStatusDisplayWithScroll(
+                                    _currentOperation,
+                                    new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 192, 203)) // 粉红色
+                                );
                             });
-                            
+                                    
                             // 现在完成视频编码（会合并音频，如果需要）
                             WriteLine("准备停止视频录制（FFmpeg）并完成编码");
-                            _videoEncoder?.Finish(); // 这会等待 FFmpeg 退出，然后根据模式决定是否合并音频
+                            _videoEncoder?.Finish(); // 这会等待 FFmpeg 退出
                             WriteLine("视频编码完成");
 
                             // 释放资源
@@ -710,7 +736,7 @@ namespace Screenshot_v3_0
                                 generatedFiles.Add("MP4文件");
                             }
                         }
-                        
+                                
                         // 收集JPG文件（如果选择了保留JPG文件）
                         if (_keepJpgFiles && _screenshotCount > 0)
                         {
@@ -722,32 +748,35 @@ namespace Screenshot_v3_0
                         {
                             _videoEncoder = null;
                             _isVideoRecording = false;
-                            
-                            // 停止截图定时器
+                                    
+                            // 停止截图定时器（双保险）
                             if (_screenshotTimer != null && _screenshotTimer.IsEnabled)
                             {
                                 _screenshotTimer.Stop();
                                 WriteLine("截图定时器已停止");
                             }
-                            
+                                    
                             // 更新按钮状态（考虑区域选择情况）
                             UpdateStartButtonState();
-                            
+                                    
                             // 清除当前操作，恢复正常状态显示
                             _isStoppingRecording = false;
                             _currentOperation = "";
-                            
+                                    
                             // 显示成功消息，显示具体的文件名
                             if (generatedFiles.Count > 0)
                             {
                                 string fileList = string.Join("、", generatedFiles);
-                                UpdateStatusDisplayOnly($"已生成文件：{fileList}", new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 235))); // 天蓝色
+                                UpdateStatusDisplayOnly(
+                                    $"已生成文件：{fileList}",
+                                    new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(135, 206, 235)) // 天蓝色
+                                );
                             }
                             else
                             {
                                 UpdateStatusDisplay("录制已停止");
                             }
-                            
+                                    
                             // 清除当前视频和音频路径
                             _currentVideoPath = null;
                             _currentAudioPath = null;
@@ -755,7 +784,7 @@ namespace Screenshot_v3_0
                     }
                     catch (Exception ex)
                     {
-                        WriteError($"停止录制失败", ex);
+                        WriteError("停止录制失败", ex);
                         Dispatcher.Invoke(() =>
                         {
                             // 停止状态更新定时器
@@ -763,7 +792,7 @@ namespace Screenshot_v3_0
                             _statusUpdateTimer = null;
                             _currentOperation = "";
                             _isStoppingRecording = false;
-                            
+                                    
                             UpdateStatusDisplay($"停止录制失败：{ex.Message}");
                             UpdateStartButtonState();
                         });
@@ -777,11 +806,12 @@ namespace Screenshot_v3_0
                 _statusUpdateTimer = null;
                 _currentOperation = "";
                 _isStoppingRecording = false;
-                
+                        
                 UpdateStatusDisplay($"停止录制视频失败：{ex.Message}");
                 UpdateStartButtonState();
             }
         }
+
 
         private void OnAudioSampleAvailable(byte[]? audioData, int bytesRecorded)
         {
