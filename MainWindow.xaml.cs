@@ -438,8 +438,8 @@ namespace Screenshot_v3_0
                     WriteLine("开始音频录制（NAudio WasapiLoopbackCapture，即使静音也会录制）");
                     WriteLine("预期WAV文件");
                     
-                    // 连接音频数据事件，实现边录边合成（仅在音频+视频模式下）
-                    if (_outputMode == OutputMode.AudioAndVideo)
+                    // 连接音频数据事件，实现边录边合成（需要视频时都连接）
+                    if (_outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly)
                     {
                         _audioRecorder.AudioSampleAvailable += OnAudioSampleAvailable;
                     }
@@ -462,9 +462,22 @@ namespace Screenshot_v3_0
                 }
                 else if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                 {
-                    // VideoEncoder.Start() 会尝试直接录制有声视频，如果失败则使用音频管道实时合成
-                    WriteLine($"启动 FFmpeg 录制视频...");
-                    _videoEncoder?.Start();
+                    // 设置音频格式参数（从 NAudio 获取，用于管道模式）
+                    if (_videoEncoder != null && _audioRecorder != null)
+                    {
+                        _videoEncoder.SetAudioFormat(
+                            _audioRecorder.BitsPerSample,
+                            _audioRecorder.IsFloatFormat,
+                            _audioRecorder.SampleRate
+                        );
+                    }
+
+                    // 启动 FFmpeg 录制
+                    // AudioAndVideo 模式使用管道模式（边录边合成，无需后期合并）
+                    // VideoOnly 模式也使用管道模式（同样需要音频）
+                    bool useAudioPipe = (_outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly);
+                    WriteLine($"启动 FFmpeg 录制视频（管道模式: {useAudioPipe}）...");
+                    _videoEncoder?.Start(useAudioPipe);
                 }
 
                 _isVideoRecording = true;
@@ -569,11 +582,8 @@ namespace Screenshot_v3_0
                         string? audioFilePathForVideo = null;
                         if (_outputMode == OutputMode.VideoOnly || _outputMode == OutputMode.AudioAndVideo)
                         {
-                            // 断开音频事件连接（避免继续写入数据，仅在 AudioAndVideo 模式下可能已连接）
-                            if (_outputMode == OutputMode.AudioAndVideo)
-                            {
-                                _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
-                            }
+                            // 断开音频事件连接（避免继续写入数据）
+                            _audioRecorder.AudioSampleAvailable -= OnAudioSampleAvailable;
                             
                             // 停止音频录制
                             WriteLine("停止音频录制");

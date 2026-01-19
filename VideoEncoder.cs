@@ -119,40 +119,39 @@ namespace Screenshot_v3_0
         /// <summary>
         /// 开始录制（使用 FFmpeg gdigrab 直接录制屏幕）
         /// </summary>
-        /// <param name="audioFilePath">音频文件路径（如果存在）</param>
-        public void Start(string? audioFilePath = null)
+        /// <param name="useAudioPipe">是否使用音频管道模式（边录边合成，需先调用 SetAudioFormat）</param>
+        public void Start(bool useAudioPipe = true)
         {
             if (!_isInitialized) return;
 
             try
             {
-                _tempAudioPath = audioFilePath;
-
                 // 计算视频码率（Mbps）
                 int videoBitrateMbps = _config.GetVideoBitrateMbps();
                 int videoBitrateKbps = videoBitrateMbps * 1000;
 
-                // 方案 A（推荐）：尝试直接录制有声视频
-                string audioDevice = GetSystemAudioDevice();
                 string arguments;
 
-                if (!string.IsNullOrEmpty(audioDevice))
+                if (useAudioPipe)
                 {
-                    // ✅ 同时录屏幕 + 系统音频
-                    arguments = BuildFfmpegCommandWithAudio(videoBitrateKbps, audioDevice);
+                    // ★ 管道模式：NAudio 录制音频（带静音填充）→ 管道 → FFmpeg 边录边合成
+                    // 优点：录制结束后无需额外合并，即使8小时视频也立即完成
+                    // NAudio 的静音填充逻辑确保开头静音不丢失
+                    arguments = BuildFfmpegCommandWithAudioPipe(videoBitrateKbps);
                     _hasAudioInVideo = true;
-                    WriteLine("✓ 录制方式: FFmpeg 直接生成 MP4（视频+音频同步录制）");
-                    WriteLine($"  音频设备: {audioDevice}");
-                    WriteLine("  说明: 视频和音频在同一 FFmpeg 进程中录制，时间戳同步，无需后续合并");
+                    WriteLine("✓ 录制方式: 管道模式 - 边录边合成（推荐）");
+                    WriteLine("  视频: FFmpeg gdigrab 录制屏幕");
+                    WriteLine("  音频: NAudio WasapiLoopbackCapture → 管道 → FFmpeg");
+                    WriteLine("  说明: NAudio 静音填充确保音视频同步，录制结束后无需合并");
                 }
                 else
                 {
-                    // 找不到音频设备，回退到只录制视频（后面用文件合并音频）
+                    // 后期合并模式：分开录制，最后合并
                     arguments = BuildFfmpegCommandWithoutAudio(videoBitrateKbps);
                     _hasAudioInVideo = false;
-                    WriteLine("✓ 录制方式: 分步录制后合并（当前边录边合成暂时禁用）");
-                    WriteLine("  视频: FFmpeg 录制（gdigrab）");
-                    WriteLine("  音频: NAudio WasapiLoopbackCapture 录制（即使静音也会录制）");
+                    WriteLine("✓ 录制方式: 后期合并模式");
+                    WriteLine("  视频: FFmpeg gdigrab 录制");
+                    WriteLine("  音频: NAudio 录制 WAV 文件");
                     WriteLine("  说明: 录制完成后使用 FFmpeg 合并音频到 MP4");
                 }
 
@@ -162,7 +161,7 @@ namespace Screenshot_v3_0
                     Arguments = arguments,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    RedirectStandardInput = true,  // 用于发送 'q' 停止
+                    RedirectStandardInput = true,  // 用于发送 'q' 停止 或 写入音频管道
                     RedirectStandardOutput = true,
                     RedirectStandardError = true
                 };
@@ -173,12 +172,11 @@ namespace Screenshot_v3_0
                     throw new Exception("无法启动 FFmpeg 进程");
                 }
 
-                // 如果使用音频管道（当前逻辑 _hasAudioInVideo 表示“视频中有音频”，但我们这里用的是 dshow，不走 stdin 管道）
-                // 保留逻辑以便以后启用 pipe:0 模式
+                // 如果使用音频管道模式，获取管道流
                 if (_hasAudioInVideo && _ffmpegProcess.StandardInput != null)
                 {
                     _audioInputStream = _ffmpegProcess.StandardInput.BaseStream;
-                    WriteLine("已准备音频管道（如启用 pipe:0 模式，可通过此流写入音频数据）");
+                    WriteLine("✓ 音频管道已就绪，等待 NAudio 数据写入");
                 }
 
                 // 异步读取 FFmpeg 错误输出，避免缓冲区堵塞
@@ -435,6 +433,20 @@ namespace Screenshot_v3_0
         }
 
         /// <summary>
+        /// 设置音频格式参数（用于管道模式，从 NAudio WaveFormat 获取）
+        /// </summary>
+        /// <param name="bitsPerSample">位深度（16/24/32）</param>
+        /// <param name="isFloat">是否为浮点格式</param>
+        /// <param name="sampleRate">采样率</param>
+        public void SetAudioFormat(int bitsPerSample, bool isFloat, int sampleRate)
+        {
+            _audioBitsPerSample = bitsPerSample;
+            _audioIsFloat = isFloat;
+            _audioSampleRate = sampleRate;
+            WriteLine($"设置音频格式: {bitsPerSample}位 {(isFloat ? "浮点" : "整数")} @ {sampleRate}Hz");
+        }
+
+        /// <summary>
         /// 写入音频数据到 FFmpeg 管道（用于实时合成，当前默认不启用）
         /// </summary>
         public void WriteAudioData(byte[] buffer, int bytesRecorded)
@@ -479,10 +491,27 @@ namespace Screenshot_v3_0
                 {
                     try
                     {
-                        process.StandardInput?.WriteLine("q");
-                        process.StandardInput?.Flush();
+                        if (_hasAudioInVideo && _audioInputStream != null)
+                        {
+                            // ★ 管道模式：关闭音频管道流来通知 FFmpeg 停止
+                            // FFmpeg 从 stdin 读取音频数据，收到 EOF 后会自动停止
+                            try
+                            {
+                                _audioInputStream.Flush();
+                                _audioInputStream.Close();
+                            }
+                            catch { }
+                            _audioInputStream = null;
+                            WriteLine("已关闭音频管道，FFmpeg 将自动完成编码...");
+                        }
+                        else
+                        {
+                            // 非管道模式：发送 'q' 命令
+                            process.StandardInput?.WriteLine("q");
+                            process.StandardInput?.Flush();
+                            WriteLine("已发送停止信号给 FFmpeg（等待完成中...）");
+                        }
                         _hasRequestedStop = true;
-                        WriteLine("已发送停止信号给 FFmpeg（等待完成中...）");
                     }
                     catch (Exception ex)
                     {
@@ -529,8 +558,18 @@ namespace Screenshot_v3_0
                                 {
                                     try
                                     {
-                                        process.StandardInput?.WriteLine("q");
-                                        process.StandardInput?.Flush();
+                                        if (_hasAudioInVideo && _audioInputStream != null)
+                                        {
+                                            // 管道模式：关闭管道
+                                            try { _audioInputStream.Close(); } catch { }
+                                            _audioInputStream = null;
+                                        }
+                                        else
+                                        {
+                                            // 非管道模式：发送 'q'
+                                            process.StandardInput?.WriteLine("q");
+                                            process.StandardInput?.Flush();
+                                        }
                                     }
                                     catch { }
 
@@ -554,10 +593,26 @@ namespace Screenshot_v3_0
                                     {
                                         try
                                         {
-                                            process.StandardInput?.WriteLine("q");
-                                            process.StandardInput?.Flush();
+                                            if (_hasAudioInVideo && _audioInputStream != null)
+                                            {
+                                                // 管道模式：关闭音频管道来通知 FFmpeg 停止
+                                                try
+                                                {
+                                                    _audioInputStream.Flush();
+                                                    _audioInputStream.Close();
+                                                }
+                                                catch { }
+                                                _audioInputStream = null;
+                                                WriteLine("已关闭音频管道，FFmpeg 将自动完成编码...");
+                                            }
+                                            else
+                                            {
+                                                // 非管道模式：发送 'q' 命令
+                                                process.StandardInput?.WriteLine("q");
+                                                process.StandardInput?.Flush();
+                                                WriteLine("已发送停止信号给 FFmpeg");
+                                            }
                                             _hasRequestedStop = true;
-                                            WriteLine("已发送停止信号给 FFmpeg");
                                         }
                                         catch (Exception ex)
                                         {
@@ -625,11 +680,11 @@ namespace Screenshot_v3_0
                                 {
                                     if (_hasAudioInVideo)
                                     {
-                                        // 视频中已包含音频
+                                        // 视频中已包含音频（管道模式）
                                         WriteLine("========== 录制完成 ==========");
                                         WriteLine($"✓ 最终文件: {_outputPath}");
-                                        WriteLine("✓ 生成方式: FFmpeg 直接录制（视频 + 音频）");
-                                        WriteLine("✓ 无需合并: 视频已包含音频流");
+                                        WriteLine("✓ 生成方式: 管道模式（NAudio → FFmpeg 边录边合成）");
+                                        WriteLine("✓ 无需后期合并: 视频已包含音频流");
                                     }
                                     else
                                     {

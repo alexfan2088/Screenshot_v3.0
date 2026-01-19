@@ -34,6 +34,21 @@ namespace Screenshot_v3_0
         public bool IsRecording => _isRecording;
 
         /// <summary>
+        /// 获取音频位深度（在 Start 后有效）
+        /// </summary>
+        public int BitsPerSample => _loopbackCapture?.WaveFormat.BitsPerSample ?? 32;
+
+        /// <summary>
+        /// 获取音频是否为浮点格式（在 Start 后有效）
+        /// </summary>
+        public bool IsFloatFormat => _loopbackCapture?.WaveFormat.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat;
+
+        /// <summary>
+        /// 获取音频采样率（在 Start 后有效）
+        /// </summary>
+        public int SampleRate => _loopbackCapture?.WaveFormat.SampleRate ?? 48000;
+
+        /// <summary>
         /// 音频样本回调（目前主要是给你预留扩展用）
         /// </summary>
         public event Action<byte[], int>? AudioSampleAvailable;
