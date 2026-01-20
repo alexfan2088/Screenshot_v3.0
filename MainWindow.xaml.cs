@@ -473,10 +473,10 @@ namespace Screenshot_v3_0
                     }
 
                     // 启动 FFmpeg 录制
-                    // AudioAndVideo 模式使用管道模式（边录边合成，无需后期合并）
-                    // VideoOnly 模式也使用管道模式（同样需要音频）
-                    bool useAudioPipe = (_outputMode == OutputMode.AudioAndVideo || _outputMode == OutputMode.VideoOnly);
-                    WriteLine($"启动 FFmpeg 录制视频（管道模式: {useAudioPipe}）...");
+                    // ★ 改用后期合并模式，避免管道同步问题导致时长不一致
+                    // 视频单独录制，音频单独录制到 WAV，最后合并
+                    bool useAudioPipe = false;
+                    WriteLine($"启动 FFmpeg 录制视频（后期合并模式）...");
                     _videoEncoder?.Start(useAudioPipe);
                 }
 

@@ -78,11 +78,15 @@ namespace Screenshot_v3_0
                 _captureWidth = captureWidth > 0 ? captureWidth : videoWidth;
                 _captureHeight = captureHeight > 0 ? captureHeight : videoHeight;
 
-                // 确保宽度和高度是 2 的倍数（H.264 要求）
+                // 确保输出宽度和高度是 2 的倍数（H.264 要求）
+                // 注意：捕获尺寸保持原始值，只对输出尺寸进行对齐
                 _videoWidth = _videoWidth + (_videoWidth % 2);
                 _videoHeight = _videoHeight + (_videoHeight % 2);
-                _captureWidth = _captureWidth + (_captureWidth % 2);
-                _captureHeight = _captureHeight + (_captureHeight % 2);
+
+                // ★ 捕获尺寸也需要对齐，但要确保不超出屏幕边界
+                // gdigrab 要求 video_size 是有效的，这里向下取整而不是向上
+                if (_captureWidth % 2 != 0) _captureWidth = _captureWidth - 1;
+                if (_captureHeight % 2 != 0) _captureHeight = _captureHeight - 1;
 
                 // 查找 FFmpeg
                 _ffmpegPath = FindFfmpeg();
@@ -320,14 +324,17 @@ namespace Screenshot_v3_0
                 scaleFilter = $"-vf scale={_videoWidth}:{_videoHeight} ";
             }
 
-            return $"-hide_banner -nostats -loglevel warning " +
+            // ★ 记录详细的 FFmpeg 参数，便于调试
+            WriteLine($"FFmpeg gdigrab 参数: offset=({_offsetX},{_offsetY}), capture_size={_captureWidth}x{_captureHeight}, output_size={_videoWidth}x{_videoHeight}");
+
+            return $"-hide_banner -loglevel info " +  // ★ 改用 info 级别以获取更多日志
                    "-thread_queue_size 1024 " +
                    "-f gdigrab " +
                    $"-framerate {_frameRate} " +
+                   "-draw_mouse 1 " +  // ★ 确保绘制鼠标
                    $"-offset_x {_offsetX} " +
                    $"-offset_y {_offsetY} " +
                    $"-video_size {_captureWidth}x{_captureHeight} " +
-                   "-use_wallclock_as_timestamps 1 " +
                    "-i desktop " +
                    scaleFilter +
                    "-c:v libx264 " +
@@ -800,16 +807,17 @@ namespace Screenshot_v3_0
                 WriteLine("正在合并音频到视频...");
                 string tempOutput = Path.ChangeExtension(videoPath, ".temp.mp4");
 
+                // ★ 移除 -shortest 参数，保持完整的音视频时长
+                // 使用视频时长为准，音频不足的部分会静音填充
                 string arguments =
                     $"-i \"{videoPath}\" " +
-                    "-ss 0 -itsoffset 0 " +
                     $"-i \"{audioPath}\" " +
                     "-c:v copy " +
                     "-c:a aac " +
                     $"-b:a {_config.AudioBitrate}k " +
                     "-ac 2 " +
                     "-map 0:v:0 -map 1:a:0 " +
-                    "-shortest -async 1 " +
+                    "-async 1 " +
                     "-avoid_negative_ts make_zero " +
                     "-fflags +genpts " +
                     $"-y \"{tempOutput}\"";
